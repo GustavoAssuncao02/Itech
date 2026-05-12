@@ -619,6 +619,14 @@ function formatCpf(value) {
   return digits.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
 }
 
+function formatCpfInput(value) {
+  const digits = normalizeCpf(value).slice(0, 11);
+  if (digits.length <= 3) return digits;
+  if (digits.length <= 6) return `${digits.slice(0, 3)}.${digits.slice(3)}`;
+  if (digits.length <= 9) return `${digits.slice(0, 3)}.${digits.slice(3, 6)}.${digits.slice(6)}`;
+  return `${digits.slice(0, 3)}.${digits.slice(3, 6)}.${digits.slice(6, 9)}-${digits.slice(9)}`;
+}
+
 function formatTimer(ms) {
   const safeMs = Math.max(0, ms);
   const minutes = String(Math.floor(safeMs / 60000)).padStart(2, '0');
@@ -698,9 +706,9 @@ export default function App() {
   const homeCategories = db.categories.filter(
     (category) => category.home && !HIDDEN_HOME_CATEGORY_SLUGS.has(category.slug)
   );
-  const favoriteOwnerId = currentUser?.id || 'guest';
+  const favoriteOwnerId = currentUser?.id || '';
   const favoriteIds = useMemo(
-    () => new Set(db.favorites?.[favoriteOwnerId] || []),
+    () => (favoriteOwnerId ? new Set(db.favorites?.[favoriteOwnerId] || []) : new Set()),
     [db.favorites, favoriteOwnerId]
   );
 
@@ -761,6 +769,14 @@ export default function App() {
         window.scrollTo({ top: 0, behavior: 'auto' });
       }
     }, 0);
+  }
+
+  function requireUserAccount(actionLabel) {
+    if (currentUser) return true;
+
+    setNotice(`${actionLabel} exige uma conta. Crie sua conta ou entre para continuar.`);
+    navigate('/cadastro');
+    return false;
   }
 
   function loginUser(email, password) {
@@ -879,6 +895,8 @@ export default function App() {
   }
 
   function upsertReservation(product, mode) {
+    if (!requireUserAccount(mode === 'reserve' ? 'Reservar' : 'Comprar')) return;
+
     const percent = mode === 'reserve' ? 50 : 100;
     const reservation = {
       mode,
@@ -900,6 +918,13 @@ export default function App() {
 
   function attachReceipt(file) {
     if (!checkout || !file) return;
+    if (!currentUser) {
+      setCheckout(null);
+      setNotice('Entre ou crie uma conta para concluir a compra.');
+      navigate('/cadastro');
+      return;
+    }
+
     const product = db.products.find((item) => item.id === checkout);
     const reservation = db.reservations[checkout];
     if (!product || !reservation) return;
@@ -909,9 +934,9 @@ export default function App() {
       id: orderId,
       productId: product.id,
       productName: product.name,
-      customerName: currentUser?.name || 'Visitante do site',
-      customerEmail: currentUser?.email || '',
-      customerCpf: currentUser?.cpf || '',
+      customerName: currentUser.name,
+      customerEmail: currentUser.email,
+      customerCpf: currentUser.cpf,
       amount: reservation.amount,
       percent: reservation.percent,
       mode: reservation.mode,
@@ -950,6 +975,8 @@ export default function App() {
   }
 
   function toggleFavorite(productId) {
+    if (!requireUserAccount('Favoritar')) return;
+
     const wasFavorite = favoriteIds.has(productId);
 
     updateDb((current) => {
@@ -1008,6 +1035,10 @@ export default function App() {
     }
 
     if (route.first === 'favoritos') {
+      if (!currentUser) {
+        return <AuthRequiredPage navigate={navigate} />;
+      }
+
       const favoriteProducts = db.products.filter((product) => favoriteIds.has(product.id));
 
       return (
@@ -1220,7 +1251,7 @@ function HomePage({ db, navCategories, homeCategories, navigate, now, favoriteId
           <PhoneMockup storeName={db.settings.storeName} />
           <div className="device-note">
             <strong>iPhone 16 Pro</strong>
-            <span>Garantia oficial · 12x sem juros</span>
+            <span>Garantia oficial · 12x no cartão</span>
           </div>
         </div>
       </section>
@@ -1680,13 +1711,44 @@ function StoreHours({ location }) {
   );
 }
 
+function AuthRequiredPage({ navigate }) {
+  return (
+    <section className="auth-page">
+      <div className="auth-card">
+        <p className="section-label">Conta</p>
+        <h1>Entre para continuar</h1>
+        <p className="auth-copy">Para comprar, reservar e favoritar produtos, crie uma conta ou entre na sua conta.</p>
+        <div className="auth-actions">
+          <button className="button primary" type="button" onClick={() => navigate('/cadastro')}>
+            Criar conta
+          </button>
+          <button className="button secondary" type="button" onClick={() => navigate('/login')}>
+            Entrar
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function UserAuthPage({ mode, navigate, onLogin, onRegister }) {
   const [form, setForm] = useState({ name: '', email: '', cpf: '', phone: '', password: '' });
   const isRegister = mode === 'register';
+  const cpfDigits = normalizeCpf(form.cpf);
+  const cpfIsValid = isValidCpf(form.cpf);
+  const cpfHint = !cpfDigits
+    ? 'Digite o CPF com 11 numeros.'
+    : cpfDigits.length < 11
+      ? 'Digite os 11 numeros do CPF.'
+      : cpfIsValid
+        ? 'CPF valido.'
+        : 'CPF invalido.';
+  const cpfHintClass = cpfDigits.length === 11 ? (cpfIsValid ? ' is-valid' : ' is-invalid') : '';
 
   function submit(event) {
     event.preventDefault();
     if (isRegister) {
+      if (!cpfIsValid) return;
       onRegister(form);
     } else {
       onLogin(form.email, form.password);
@@ -1727,9 +1789,15 @@ function UserAuthPage({ mode, navigate, onLogin, onRegister }) {
                 required
                 inputMode="numeric"
                 placeholder="000.000.000-00"
+                maxLength={14}
                 value={form.cpf}
-                onChange={(event) => setForm({ ...form, cpf: event.target.value })}
+                onChange={(event) => setForm({ ...form, cpf: formatCpfInput(event.target.value) })}
+                aria-invalid={cpfDigits.length === 11 && !cpfIsValid ? 'true' : undefined}
+                aria-describedby="user-cpf-hint"
               />
+              <span id="user-cpf-hint" className={`field-hint${cpfHintClass}`}>
+                {cpfHint}
+              </span>
             </label>
           ) : null}
           <label>
@@ -1741,7 +1809,7 @@ function UserAuthPage({ mode, navigate, onLogin, onRegister }) {
               onChange={(event) => setForm({ ...form, password: event.target.value })}
             />
           </label>
-          <button className="button primary" type="submit">
+          <button className="button primary" type="submit" disabled={isRegister && !cpfIsValid}>
             {isRegister ? 'Cadastrar' : 'Entrar'}
           </button>
         </form>
@@ -1777,10 +1845,21 @@ function AdminAuth({ onLogin, onRegister, navigate }) {
   const [mode, setMode] = useState('login');
   const [form, setForm] = useState({ name: '', email: '', cpf: '', password: '' });
   const isRegister = mode === 'register';
+  const cpfDigits = normalizeCpf(form.cpf);
+  const cpfIsValid = isValidCpf(form.cpf);
+  const cpfHint = !cpfDigits
+    ? 'Digite o CPF com 11 numeros.'
+    : cpfDigits.length < 11
+      ? 'Digite os 11 numeros do CPF.'
+      : cpfIsValid
+        ? 'CPF valido.'
+        : 'CPF invalido.';
+  const cpfHintClass = cpfDigits.length === 11 ? (cpfIsValid ? ' is-valid' : ' is-invalid') : '';
 
   function submit(event) {
     event.preventDefault();
     if (isRegister) {
+      if (!cpfIsValid) return;
       onRegister(form);
     } else {
       onLogin(form.email, form.password);
@@ -1815,9 +1894,15 @@ function AdminAuth({ onLogin, onRegister, navigate }) {
                 required
                 inputMode="numeric"
                 placeholder="000.000.000-00"
+                maxLength={14}
                 value={form.cpf}
-                onChange={(event) => setForm({ ...form, cpf: event.target.value })}
+                onChange={(event) => setForm({ ...form, cpf: formatCpfInput(event.target.value) })}
+                aria-invalid={cpfDigits.length === 11 && !cpfIsValid ? 'true' : undefined}
+                aria-describedby="admin-cpf-hint"
               />
+              <span id="admin-cpf-hint" className={`field-hint${cpfHintClass}`}>
+                {cpfHint}
+              </span>
             </label>
           ) : null}
           <label>
@@ -1829,7 +1914,7 @@ function AdminAuth({ onLogin, onRegister, navigate }) {
               onChange={(event) => setForm({ ...form, password: event.target.value })}
             />
           </label>
-          <button className="button primary" type="submit">
+          <button className="button primary" type="submit" disabled={isRegister && !cpfIsValid}>
             {isRegister ? 'Enviar solicitação' : 'Entrar'}
           </button>
         </form>

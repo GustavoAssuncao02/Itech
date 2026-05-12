@@ -33,7 +33,7 @@ export default function Hero({ hero }) {
         <PhoneMockup />
         <div className="device-note">
           <strong>iPhone 16 Pro</strong>
-          <span>Garantia oficial · 12x sem juros</span>
+          <span>Garantia oficial · 12x no cartão</span>
         </div>
       </div>
     </section>

@@ -19,7 +19,7 @@ export default function Footer({ store, categories }) {
       </div>
 
       <small>
-        Copyright © 2026 {store.name}. Garantia oficial e parcelamento em até 12x sem juros.
+        Copyright © 2026 {store.name}. Garantia oficial e parcelamento em até 12x no cartão.
       </small>
     </footer>
   );
