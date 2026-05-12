@@ -60,6 +60,24 @@ export async function migrate() {
       FOREIGN KEY (category_slug) REFERENCES categories(slug)
     );
 
+    CREATE TABLE IF NOT EXISTS product_images (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_id INTEGER NOT NULL,
+      image_url TEXT NOT NULL,
+      alt_text TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      is_cover INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS user_favorites (
+      user_id TEXT NOT NULL,
+      product_id INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, product_id),
+      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+    );
+
     CREATE TABLE IF NOT EXISTS business_hours (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       label TEXT NOT NULL,
@@ -146,9 +164,42 @@ export async function getProducts({ featured, category } = {}) {
     params
   );
 
+  if (!rows.length) {
+    return [];
+  }
+
+  const placeholders = rows.map(() => '?').join(', ');
+  const imageRows = await db.all(
+    `
+      SELECT
+        product_id AS productId,
+        image_url AS url,
+        alt_text AS alt,
+        sort_order AS sortOrder,
+        is_cover AS isCover
+      FROM product_images
+      WHERE product_id IN (${placeholders})
+      ORDER BY product_id ASC, is_cover DESC, sort_order ASC, id ASC
+    `,
+    rows.map((row) => row.id)
+  );
+
+  const imagesByProduct = imageRows.reduce((grouped, image) => {
+    const current = grouped.get(image.productId) || [];
+    current.push({
+      url: image.url,
+      alt: image.alt,
+      sortOrder: image.sortOrder,
+      isCover: Boolean(image.isCover)
+    });
+    grouped.set(image.productId, current);
+    return grouped;
+  }, new Map());
+
   return rows.map((row) => ({
     ...row,
-    featured: Boolean(row.featured)
+    featured: Boolean(row.featured),
+    images: imagesByProduct.get(row.id) || []
   }));
 }
 

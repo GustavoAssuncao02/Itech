@@ -21,8 +21,6 @@ const categories = [
   ['AirPods', 'airpods', 'AirPods Pro, AirPods 4 e AirPods Max', 'headphones', 4],
   ['iPad', 'ipad', 'iPad Pro, Air, mini e acessórios de produtividade', 'tablet', 5],
   ['Acessórios', 'acessorios', 'Capas, cabos, fontes, MagSafe e proteção', 'cable', 6],
-  ['Apple TV', 'apple-tv', 'Apple TV 4K para cinema em casa', 'tv', 7],
-  ['HomePod', 'homepod', 'Som inteligente para casa conectada', 'speaker', 8]
 ];
 
 const products = [
@@ -55,6 +53,8 @@ async function seed() {
     await db.exec(`
       DELETE FROM business_hours;
       DELETE FROM store_locations;
+      DELETE FROM user_favorites;
+      DELETE FROM product_images;
       DELETE FROM products;
       DELETE FROM categories;
       DELETE FROM store_settings;
