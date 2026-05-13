@@ -2,17 +2,25 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
+  BarChart3,
   Cable,
+  CalendarDays,
   Check,
   Clock,
   Copy,
+  DollarSign,
+  Eye,
+  FileText,
   Heart,
   Headphones,
   Instagram,
+  KeyRound,
   Laptop,
+  LogOut,
   MapPin,
   MessageCircle,
   MonitorPlay,
+  PackageCheck,
   Plus,
   Save,
   ShoppingBag,
@@ -20,8 +28,11 @@ import {
   Smartphone,
   Speaker,
   Tablet,
+  TrendingUp,
   Trash2,
   Upload,
+  UserRound,
+  Users,
   Watch,
   X
 } from 'lucide-react';
@@ -30,6 +41,7 @@ import itechLogo from './assets/logo.jpg';
 const DB_KEY = 'itech_store_db_v3';
 const CURRENT_USER_KEY = 'itech_current_user_id';
 const CURRENT_ADMIN_KEY = 'itech_current_admin_id';
+const VISITOR_KEY = 'itech_visitor_id';
 const RESERVATION_MS = 5 * 60 * 1000;
 const HIDDEN_HOME_CATEGORY_SLUGS = new Set(['apple-tv', 'homepod']);
 
@@ -428,6 +440,8 @@ function createDefaultDb() {
     users: [],
     admins: DEFAULT_ADMINS,
     favorites: {},
+    carts: {},
+    analytics: { visits: [] },
     orders: [],
     reservations: {}
   };
@@ -460,6 +474,8 @@ function normalizeDb(db) {
     users: existing.users || [],
     admins,
     favorites: existing.favorites || {},
+    carts: existing.carts || {},
+    analytics: normalizeAnalytics(existing.analytics),
     orders: existing.orders || [],
     reservations: existing.reservations || {}
   };
@@ -475,9 +491,16 @@ function preserveDbShape(db) {
     users: existing.users || [],
     admins: mergeDefaultAdmins(existing.admins || []),
     favorites: existing.favorites || {},
+    carts: existing.carts || {},
+    analytics: normalizeAnalytics(existing.analytics),
     orders: existing.orders || [],
     reservations: existing.reservations || {}
   };
+}
+
+function normalizeAnalytics(analytics) {
+  const visits = Array.isArray(analytics?.visits) ? analytics.visits : [];
+  return { visits };
 }
 
 function readDb() {
@@ -581,6 +604,30 @@ function readProductImageFiles(files) {
   return Promise.all(Array.from(files || []).map(readProductImageFile));
 }
 
+function readReceiptFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      resolve({
+        name: file.name,
+        type: file.type || 'application/octet-stream',
+        dataUrl: String(reader.result)
+      });
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function getVisitorId() {
+  const existingId = window.localStorage.getItem(VISITOR_KEY);
+  if (existingId) return existingId;
+
+  const visitorId = createId('visitante', 'visitor');
+  window.localStorage.setItem(VISITOR_KEY, visitorId);
+  return visitorId;
+}
+
 function getRoute() {
   const path = window.location.pathname.replace(/\/$/, '') || '/';
   const [, first, second] = path.split('/');
@@ -635,6 +682,42 @@ function formatTimer(ms) {
   return `${minutes}:${seconds}`;
 }
 
+function toDate(value) {
+  const date = value ? new Date(value) : new Date();
+  return Number.isNaN(date.getTime()) ? new Date() : date;
+}
+
+function startOfDay(value = new Date()) {
+  const date = toDate(value);
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function startOfMonth(value = new Date()) {
+  const date = toDate(value);
+  return new Date(date.getFullYear(), date.getMonth(), 1);
+}
+
+function startOfYear(value = new Date()) {
+  const date = toDate(value);
+  return new Date(date.getFullYear(), 0, 1);
+}
+
+function getDateKey(value = new Date()) {
+  const date = toDate(value);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function formatShortDate(value) {
+  return toDate(value).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+}
+
+function isDateOnOrAfter(value, start) {
+  return toDate(value).getTime() >= start.getTime();
+}
+
 function colorLabel(value) {
   return COLOR_OPTIONS.find((color) => color.value === value)?.label || value;
 }
@@ -664,8 +747,12 @@ function getProductStatus(product, reservations, now) {
   };
 }
 
-function applyFilters(items, filters) {
+function applyFilters(items, filters, reservations = {}, now = Date.now()) {
   let filtered = [...items];
+
+  if (filters.hideUnavailable) {
+    filtered = filtered.filter((product) => !getProductStatus(product, reservations, now).blocked);
+  }
 
   if (filters.conditions.length) {
     filtered = filtered.filter((product) => filters.conditions.includes(product.condition));
@@ -690,19 +777,20 @@ export default function App() {
   const [db, setDb] = useState(readDb);
   const [route, setRoute] = useState(getRoute);
   const [checkout, setCheckout] = useState(null);
+  const [cartCheckout, setCartCheckout] = useState(null);
   const [now, setNow] = useState(Date.now());
   const [notice, setNotice] = useState('');
   const [currentUserId, setCurrentUserId] = useState(
     () => window.localStorage.getItem(CURRENT_USER_KEY) || ''
   );
   const [currentAdminId, setCurrentAdminId] = useState(
-    () => window.localStorage.getItem(CURRENT_ADMIN_KEY) || ''
+    () => window.sessionStorage.getItem(CURRENT_ADMIN_KEY) || ''
   );
 
   const currentUser = db.users.find((user) => user.id === currentUserId);
-  const currentAdmin = db.admins.find(
-    (admin) => admin.id === currentAdminId && admin.status === 'approved'
-  );
+  const currentAdmin = currentUser
+    ? null
+    : db.admins.find((admin) => admin.id === currentAdminId && admin.status === 'approved');
   const navCategories = db.categories.filter((category) => category.nav);
   const homeCategories = db.categories.filter(
     (category) => category.home && !HIDDEN_HOME_CATEGORY_SLUGS.has(category.slug)
@@ -712,10 +800,23 @@ export default function App() {
     () => (favoriteOwnerId ? new Set(db.favorites?.[favoriteOwnerId] || []) : new Set()),
     [db.favorites, favoriteOwnerId]
   );
+  const cartOwnerId = currentUser?.id || '';
+  const cartIds = useMemo(
+    () => (cartOwnerId ? db.carts?.[cartOwnerId] || [] : []),
+    [cartOwnerId, db.carts]
+  );
+  const cartProducts = useMemo(
+    () => cartIds.map((productId) => db.products.find((product) => product.id === productId)).filter(Boolean),
+    [cartIds, db.products]
+  );
 
   useEffect(() => {
     writeDb(db);
   }, [db]);
+
+  useEffect(() => {
+    window.localStorage.removeItem(CURRENT_ADMIN_KEY);
+  }, []);
 
   useEffect(() => {
     const onPopState = () => setRoute(getRoute());
@@ -749,6 +850,61 @@ export default function App() {
     const timer = window.setTimeout(() => setNotice(''), 3400);
     return () => window.clearTimeout(timer);
   }, [notice]);
+
+  useEffect(() => {
+    const createdAt = new Date().toISOString();
+    const account = currentUser
+      ? {
+          role: 'user',
+          userId: currentUser.id,
+          userName: currentUser.name,
+          userEmail: currentUser.email
+        }
+      : currentAdmin
+        ? {
+            role: 'admin',
+            userId: currentAdmin.id,
+            userName: currentAdmin.name,
+            userEmail: currentAdmin.email
+          }
+        : {
+            role: 'guest',
+            userId: '',
+            userName: 'Visitante',
+            userEmail: ''
+          };
+
+    const visit = {
+      id: createId(`${account.role}-${route.path}`, 'visit'),
+      visitorId: getVisitorId(),
+      path: route.path,
+      createdAt,
+      dateKey: getDateKey(createdAt),
+      ...account
+    };
+
+    setDb((current) => {
+      const visits = current.analytics?.visits || [];
+      const lastVisit = visits[visits.length - 1];
+      const lastVisitTime = lastVisit ? new Date(lastVisit.createdAt).getTime() : 0;
+      const isDuplicate =
+        lastVisit &&
+        lastVisit.path === visit.path &&
+        lastVisit.role === visit.role &&
+        lastVisit.userId === visit.userId &&
+        Date.now() - lastVisitTime < 5000;
+
+      if (isDuplicate) return current;
+
+      return preserveDbShape({
+        ...current,
+        analytics: {
+          ...(current.analytics || {}),
+          visits: [...visits.slice(-999), visit]
+        }
+      });
+    });
+  }, [route.path, currentUserId, currentAdminId]);
 
   function updateDb(updater) {
     setDb((current) => {
@@ -790,8 +946,11 @@ export default function App() {
       return;
     }
 
+    window.localStorage.removeItem(CURRENT_ADMIN_KEY);
+    window.sessionStorage.removeItem(CURRENT_ADMIN_KEY);
     window.localStorage.setItem(CURRENT_USER_KEY, user.id);
     setCurrentUserId(user.id);
+    setCurrentAdminId('');
     setNotice(`Bem-vindo, ${user.name}.`);
     navigate('/');
   }
@@ -818,10 +977,89 @@ export default function App() {
 
     const user = { ...payload, cpf, id: createId(payload.email, 'user'), createdAt: new Date().toISOString() };
     updateDb((current) => ({ ...current, users: [...current.users, user] }));
+    window.localStorage.removeItem(CURRENT_ADMIN_KEY);
+    window.sessionStorage.removeItem(CURRENT_ADMIN_KEY);
     window.localStorage.setItem(CURRENT_USER_KEY, user.id);
     setCurrentUserId(user.id);
+    setCurrentAdminId('');
     setNotice('Cadastro criado.');
     navigate('/');
+  }
+
+  function updateUserProfile(payload) {
+    if (!currentUser) return false;
+
+    const name = String(payload.name || '').trim();
+    const email = String(payload.email || '').trim();
+    const phone = String(payload.phone || '').trim();
+
+    if (!name || !email) {
+      setNotice('Nome e e-mail sao obrigatorios.');
+      return false;
+    }
+
+    const emailAlreadyUsed = db.users.some(
+      (user) => user.id !== currentUser.id && user.email.toLowerCase() === email.toLowerCase()
+    );
+
+    if (emailAlreadyUsed) {
+      setNotice('Esse e-mail ja esta cadastrado em outra conta.');
+      return false;
+    }
+
+    updateDb((current) => ({
+      ...current,
+      users: current.users.map((user) =>
+        user.id === currentUser.id
+          ? {
+              ...user,
+              name,
+              email,
+              phone,
+              cpf: currentUser.cpf,
+              updatedAt: new Date().toISOString()
+            }
+          : user
+      )
+    }));
+
+    setNotice('Dados do perfil atualizados.');
+    return true;
+  }
+
+  function changeUserPassword(payload) {
+    if (!currentUser) return false;
+
+    const currentPassword = String(payload.currentPassword || '');
+    const newPassword = String(payload.newPassword || '');
+    const confirmPassword = String(payload.confirmPassword || '');
+
+    if (currentUser.password !== currentPassword) {
+      setNotice('Senha atual invalida.');
+      return false;
+    }
+
+    if (newPassword.length < 4) {
+      setNotice('A nova senha precisa ter pelo menos 4 caracteres.');
+      return false;
+    }
+
+    if (newPassword !== confirmPassword) {
+      setNotice('As novas senhas nao conferem.');
+      return false;
+    }
+
+    updateDb((current) => ({
+      ...current,
+      users: current.users.map((user) =>
+        user.id === currentUser.id
+          ? { ...user, password: newPassword, passwordUpdatedAt: new Date().toISOString() }
+          : user
+      )
+    }));
+
+    setNotice('Senha alterada.');
+    return true;
   }
 
   function logoutUser() {
@@ -843,7 +1081,10 @@ export default function App() {
       return;
     }
 
-    window.localStorage.setItem(CURRENT_ADMIN_KEY, admin.id);
+    window.localStorage.removeItem(CURRENT_USER_KEY);
+    window.localStorage.removeItem(CURRENT_ADMIN_KEY);
+    window.sessionStorage.setItem(CURRENT_ADMIN_KEY, admin.id);
+    setCurrentUserId('');
     setCurrentAdminId(admin.id);
     setNotice(`Admin conectado: ${admin.name}.`);
   }
@@ -880,7 +1121,10 @@ export default function App() {
     updateDb((current) => ({ ...current, admins: [...current.admins, admin] }));
 
     if (admin.status === 'approved') {
-      window.localStorage.setItem(CURRENT_ADMIN_KEY, admin.id);
+      window.localStorage.removeItem(CURRENT_USER_KEY);
+      window.localStorage.removeItem(CURRENT_ADMIN_KEY);
+      window.sessionStorage.setItem(CURRENT_ADMIN_KEY, admin.id);
+      setCurrentUserId('');
       setCurrentAdminId(admin.id);
       setNotice('Primeiro admin criado e aprovado automaticamente.');
       return;
@@ -891,6 +1135,7 @@ export default function App() {
 
   function logoutAdmin() {
     window.localStorage.removeItem(CURRENT_ADMIN_KEY);
+    window.sessionStorage.removeItem(CURRENT_ADMIN_KEY);
     setCurrentAdminId('');
     setNotice('Admin desconectado.');
   }
@@ -917,7 +1162,7 @@ export default function App() {
     setCheckout(product.id);
   }
 
-  function attachReceipt(file) {
+  async function attachReceipt(file) {
     if (!checkout || !file) return;
     if (!currentUser) {
       setCheckout(null);
@@ -930,18 +1175,29 @@ export default function App() {
     const reservation = db.reservations[checkout];
     if (!product || !reservation) return;
 
+    let receiptFile;
+    try {
+      receiptFile = await readReceiptFile(file);
+    } catch {
+      setNotice('Nao foi possivel ler o comprovante. Tente anexar novamente.');
+      return;
+    }
+
     const orderId = reservation.orderId || createId(`${product.id}-pedido`, 'order');
     const order = {
       id: orderId,
       productId: product.id,
       productName: product.name,
+      customerId: currentUser.id,
       customerName: currentUser.name,
       customerEmail: currentUser.email,
       customerCpf: currentUser.cpf,
       amount: reservation.amount,
       percent: reservation.percent,
       mode: reservation.mode,
-      receiptName: file.name,
+      receiptName: receiptFile.name,
+      receiptType: receiptFile.type,
+      receiptDataUrl: receiptFile.dataUrl,
       status: 'pending',
       createdAt: new Date().toISOString()
     };
@@ -959,7 +1215,9 @@ export default function App() {
           [product.id]: {
             ...current.reservations[product.id],
             proofAttached: true,
-            receiptName: file.name,
+            receiptName: receiptFile.name,
+            receiptType: receiptFile.type,
+            receiptDataUrl: receiptFile.dataUrl,
             orderId,
             expiresAt: null
           }
@@ -968,6 +1226,197 @@ export default function App() {
     });
 
     setNotice('Comprovante enviado para validação no painel admin.');
+  }
+
+  function addToCart(product) {
+    if (!requireUserAccount('Adicionar ao carrinho')) return;
+
+    const status = getProductStatus(product, db.reservations, now);
+    if (status.blocked) {
+      setNotice('Esse produto nao esta disponivel para adicionar ao carrinho.');
+      return;
+    }
+
+    if (cartIds.includes(product.id)) {
+      setNotice('Esse produto ja esta no carrinho.');
+      navigate('/carrinho');
+      return;
+    }
+
+    updateDb((current) => ({
+      ...current,
+      carts: {
+        ...(current.carts || {}),
+        [cartOwnerId]: [...(current.carts?.[cartOwnerId] || []), product.id]
+      }
+    }));
+
+    setNotice(`${product.name} adicionado ao carrinho.`);
+  }
+
+  function removeFromCart(productId) {
+    if (!cartOwnerId) return;
+
+    updateDb((current) => ({
+      ...current,
+      carts: {
+        ...(current.carts || {}),
+        [cartOwnerId]: (current.carts?.[cartOwnerId] || []).filter((id) => id !== productId)
+      }
+    }));
+    setNotice('Produto removido do carrinho.');
+  }
+
+  function clearCart() {
+    if (!cartOwnerId) return;
+
+    updateDb((current) => ({
+      ...current,
+      carts: {
+        ...(current.carts || {}),
+        [cartOwnerId]: []
+      }
+    }));
+    setNotice('Carrinho limpo.');
+  }
+
+  function upsertCartReservation() {
+    if (!requireUserAccount('Comprar pelo carrinho')) return;
+
+    const availableProducts = cartProducts.filter(
+      (product) => !getProductStatus(product, db.reservations, now).blocked
+    );
+
+    if (!availableProducts.length) {
+      setNotice('Nao ha produtos disponiveis no carrinho para comprar.');
+      return;
+    }
+
+    const cartId = createId(`${currentUser.id}-carrinho`, 'cart');
+    const expiresAt = Date.now() + RESERVATION_MS;
+
+    updateDb((current) => {
+      const reservations = { ...(current.reservations || {}) };
+      availableProducts.forEach((product) => {
+        reservations[product.id] = {
+          mode: 'cart',
+          cartId,
+          percent: 100,
+          amount: product.price,
+          expiresAt,
+          proofAttached: false,
+          receiptName: '',
+          orderId: '',
+          createdAt: new Date().toISOString()
+        };
+      });
+
+      return { ...current, reservations };
+    });
+
+    setCartCheckout({ id: cartId, productIds: availableProducts.map((product) => product.id) });
+  }
+
+  async function attachCartReceipt(file) {
+    if (!cartCheckout || !file) return;
+    if (!currentUser) {
+      setCartCheckout(null);
+      setNotice('Entre ou crie uma conta para concluir a compra.');
+      navigate('/cadastro');
+      return;
+    }
+
+    const productsInCheckout = cartCheckout.productIds
+      .map((productId) => db.products.find((product) => product.id === productId))
+      .filter(Boolean);
+
+    if (!productsInCheckout.length) return;
+
+    const checkoutReservations = productsInCheckout
+      .map((product) => db.reservations?.[product.id])
+      .filter((reservation) => reservation?.cartId === cartCheckout.id);
+
+    if (checkoutReservations.length !== productsInCheckout.length) {
+      setNotice('A reserva do carrinho expirou. Tente comprar novamente.');
+      setCartCheckout(null);
+      return;
+    }
+
+    let receiptFile;
+    try {
+      receiptFile = await readReceiptFile(file);
+    } catch {
+      setNotice('Nao foi possivel ler o comprovante. Tente anexar novamente.');
+      return;
+    }
+
+    const orderId =
+      checkoutReservations.find((reservation) => reservation.orderId)?.orderId ||
+      createId(`${cartCheckout.id}-pedido`, 'order');
+    const amount = productsInCheckout.reduce((total, product) => total + product.price, 0);
+    const items = productsInCheckout.map((product) => ({
+      productId: product.id,
+      productName: product.name,
+      amount: product.price,
+      condition: product.condition
+    }));
+    const order = {
+      id: orderId,
+      productId: productsInCheckout[0]?.id || '',
+      productIds: productsInCheckout.map((product) => product.id),
+      productName:
+        productsInCheckout.length === 1
+          ? productsInCheckout[0].name
+          : `Carrinho (${productsInCheckout.length} produtos)`,
+      items,
+      customerId: currentUser.id,
+      customerName: currentUser.name,
+      customerEmail: currentUser.email,
+      customerCpf: currentUser.cpf,
+      amount,
+      percent: 100,
+      mode: 'cart',
+      receiptName: receiptFile.name,
+      receiptType: receiptFile.type,
+      receiptDataUrl: receiptFile.dataUrl,
+      status: 'pending',
+      createdAt: new Date().toISOString()
+    };
+
+    updateDb((current) => {
+      const orders = current.orders.some((item) => item.id === orderId)
+        ? current.orders.map((item) => (item.id === orderId ? { ...item, ...order } : item))
+        : [...current.orders, order];
+      const reservations = { ...(current.reservations || {}) };
+
+      productsInCheckout.forEach((product) => {
+        reservations[product.id] = {
+          ...reservations[product.id],
+          proofAttached: true,
+          receiptName: receiptFile.name,
+          receiptType: receiptFile.type,
+          receiptDataUrl: receiptFile.dataUrl,
+          orderId,
+          expiresAt: null
+        };
+      });
+
+      const currentCart = current.carts?.[cartOwnerId] || [];
+      const purchasedIds = new Set(productsInCheckout.map((product) => product.id));
+
+      return {
+        ...current,
+        orders,
+        reservations,
+        carts: {
+          ...(current.carts || {}),
+          [cartOwnerId]: currentCart.filter((productId) => !purchasedIds.has(productId))
+        }
+      };
+    });
+
+    setCartCheckout(null);
+    setNotice('Comprovante do carrinho enviado para validacao no painel admin.');
   }
 
   function copyPixKey() {
@@ -1012,6 +1461,7 @@ export default function App() {
           now={now}
           favoriteIds={favoriteIds}
           onCheckout={upsertReservation}
+          onAddToCart={addToCart}
           onToggleFavorite={toggleFavorite}
         />
       );
@@ -1029,6 +1479,7 @@ export default function App() {
           now={now}
           navigate={navigate}
           onCheckout={upsertReservation}
+          onAddToCart={addToCart}
           favoriteIds={favoriteIds}
           onToggleFavorite={toggleFavorite}
         />
@@ -1053,7 +1504,52 @@ export default function App() {
           now={now}
           navigate={navigate}
           onCheckout={upsertReservation}
+          onAddToCart={addToCart}
           favoriteIds={favoriteIds}
+          onToggleFavorite={toggleFavorite}
+        />
+      );
+    }
+
+    if (route.first === 'carrinho') {
+      if (!currentUser) {
+        return <AuthRequiredPage navigate={navigate} />;
+      }
+
+      return (
+        <CartPage
+          products={cartProducts}
+          reservations={db.reservations}
+          now={now}
+          navigate={navigate}
+          onRemove={removeFromCart}
+          onClear={clearCart}
+          onCheckout={upsertCartReservation}
+        />
+      );
+    }
+
+    if (route.first === 'perfil') {
+      if (!currentUser) {
+        return <AuthRequiredPage navigate={navigate} />;
+      }
+
+      const favoriteProducts = db.products.filter((product) => favoriteIds.has(product.id));
+
+      return (
+        <CustomerProfilePage
+          db={db}
+          user={currentUser}
+          favoriteProducts={favoriteProducts}
+          favoriteIds={favoriteIds}
+          reservations={db.reservations}
+          now={now}
+          navigate={navigate}
+          onUpdateProfile={updateUserProfile}
+          onChangePassword={changeUserPassword}
+          onLogout={logoutUser}
+          onCheckout={upsertReservation}
+          onAddToCart={addToCart}
           onToggleFavorite={toggleFavorite}
         />
       );
@@ -1074,6 +1570,7 @@ export default function App() {
           now={now}
           navigate={navigate}
           onCheckout={upsertReservation}
+          onAddToCart={addToCart}
           favoriteIds={favoriteIds}
           onToggleFavorite={toggleFavorite}
         />
@@ -1094,6 +1591,7 @@ export default function App() {
           now={now}
           navigate={navigate}
           onCheckout={upsertReservation}
+          onAddToCart={addToCart}
           isFavorite={favoriteIds.has(product.id)}
           favoriteIds={favoriteIds}
           onToggleFavorite={toggleFavorite}
@@ -1134,9 +1632,9 @@ export default function App() {
         categories={navCategories}
         currentUser={currentUser}
         favoriteCount={favoriteIds.size}
+        cartCount={cartProducts.length}
         route={route}
         navigate={navigate}
-        onLogoutUser={logoutUser}
       />
       <main>{renderPage()}</main>
       <Footer settings={db.settings} categories={navCategories} navigate={navigate} />
@@ -1148,6 +1646,19 @@ export default function App() {
           now={now}
           onClose={() => setCheckout(null)}
           onReceipt={attachReceipt}
+          onCopyPix={copyPixKey}
+        />
+      ) : null}
+      {cartCheckout ? (
+        <CartCheckoutModal
+          products={cartCheckout.productIds
+            .map((productId) => db.products.find((product) => product.id === productId))
+            .filter(Boolean)}
+          reservations={db.reservations}
+          settings={db.settings}
+          now={now}
+          onClose={() => setCartCheckout(null)}
+          onReceipt={attachCartReceipt}
           onCopyPix={copyPixKey}
         />
       ) : null}
@@ -1172,7 +1683,7 @@ function AppLink({ to, navigate, children, className, scrollTarget, ...props }) 
   );
 }
 
-function Navbar({ settings, categories, currentUser, favoriteCount, route, navigate, onLogoutUser }) {
+function Navbar({ settings, categories, currentUser, favoriteCount, cartCount, route, navigate }) {
   return (
     <header className="site-header">
       <div className="top-line" />
@@ -1196,9 +1707,9 @@ function Navbar({ settings, categories, currentUser, favoriteCount, route, navig
 
         <div className="nav-actions">
           {currentUser ? (
-            <button className="nav-plain" type="button" onClick={onLogoutUser}>
+            <AppLink className="nav-plain" to="/perfil" navigate={navigate}>
               {currentUser.name}
-            </button>
+            </AppLink>
           ) : (
             <AppLink className="nav-plain" to="/login" navigate={navigate}>
               Entrar
@@ -1207,6 +1718,10 @@ function Navbar({ settings, categories, currentUser, favoriteCount, route, navig
           <AppLink className="nav-action" to="/produtos" navigate={navigate}>
             <ShoppingBag size={16} aria-hidden="true" />
             Comprar
+          </AppLink>
+          <AppLink className="nav-cart" to="/carrinho" navigate={navigate} aria-label="Ver carrinho">
+            <ShoppingCart size={16} aria-hidden="true" />
+            {cartCount ? <span>{cartCount}</span> : null}
           </AppLink>
           <AppLink className="nav-favorite" to="/favoritos" navigate={navigate} aria-label="Ver favoritos">
             <Heart size={16} aria-hidden="true" />
@@ -1218,7 +1733,7 @@ function Navbar({ settings, categories, currentUser, favoriteCount, route, navig
   );
 }
 
-function HomePage({ db, navCategories, homeCategories, navigate, now, favoriteIds, onCheckout, onToggleFavorite }) {
+function HomePage({ db, navCategories, homeCategories, navigate, now, favoriteIds, onCheckout, onAddToCart, onToggleFavorite }) {
   const featured = db.products.filter((product) => product.featured).slice(0, 8);
 
   return (
@@ -1285,6 +1800,7 @@ function HomePage({ db, navCategories, homeCategories, navigate, now, favoriteId
                 now={now}
                 navigate={navigate}
                 onCheckout={onCheckout}
+                onAddToCart={onAddToCart}
                 isFavorite={favoriteIds.has(product.id)}
                 onToggleFavorite={onToggleFavorite}
               />
@@ -1308,14 +1824,18 @@ function CollectionPage({
   now,
   navigate,
   onCheckout,
+  onAddToCart,
   favoriteIds,
   onToggleFavorite
 }) {
-  const [filters, setFilters] = useState({ conditions: [], colors: [], sort: '' });
-  const filteredProducts = useMemo(() => applyFilters(products, filters), [products, filters]);
+  const [filters, setFilters] = useState({ conditions: [], colors: [], sort: '', hideUnavailable: false });
+  const filteredProducts = useMemo(
+    () => applyFilters(products, filters, reservations, now),
+    [products, filters, reservations, now]
+  );
 
   useEffect(() => {
-    setFilters({ conditions: [], colors: [], sort: '' });
+    setFilters({ conditions: [], colors: [], sort: '', hideUnavailable: false });
   }, [activeSlug]);
 
   return (
@@ -1347,7 +1867,13 @@ function CollectionPage({
       </div>
 
       <section className="section collection-products">
-        <ProductFilters products={products} filters={filters} setFilters={setFilters} />
+        <ProductFilters
+          products={products}
+          filters={filters}
+          setFilters={setFilters}
+          reservations={reservations}
+          now={now}
+        />
         <div className="result-line">{filteredProducts.length} produto(s) encontrado(s)</div>
         <div className="product-grid">
           {filteredProducts.map((product) => (
@@ -1358,20 +1884,23 @@ function CollectionPage({
               now={now}
               navigate={navigate}
               onCheckout={onCheckout}
+              onAddToCart={onAddToCart}
               isFavorite={favoriteIds.has(product.id)}
               onToggleFavorite={onToggleFavorite}
             />
           ))}
         </div>
       </section>
+
     </>
   );
 }
 
-function ProductFilters({ products, filters, setFilters }) {
+function ProductFilters({ products, filters, setFilters, reservations, now }) {
   const availableColors = COLOR_OPTIONS.filter((color) =>
     products.some((product) => product.color === color.value)
   );
+  const unavailableCount = products.filter((product) => getProductStatus(product, reservations, now).blocked).length;
 
   function toggleCondition(condition) {
     setFilters((current) => ({
@@ -1438,6 +1967,19 @@ function ProductFilters({ products, filters, setFilters }) {
           <option value="price-desc">Maior preço</option>
         </select>
       </label>
+
+      <div className="availability-filter">
+        <strong>Disponibilidade</strong>
+        <label className="toggle-row">
+          <input
+            type="checkbox"
+            checked={filters.hideUnavailable}
+            onChange={(event) => setFilters((current) => ({ ...current, hideUnavailable: event.target.checked }))}
+          />
+          <span>Ocultar indisponiveis</span>
+        </label>
+        <small>{unavailableCount} produto(s) indisponivel(is)</small>
+      </div>
     </aside>
   );
 }
@@ -1451,6 +1993,7 @@ function ProductPage({
   now,
   navigate,
   onCheckout,
+  onAddToCart,
   isFavorite,
   favoriteIds,
   onToggleFavorite
@@ -1458,6 +2001,8 @@ function ProductPage({
   const status = getProductStatus(product, reservations, now);
   const category = categories.find((item) => item.slug === product.category);
   const similar = products.filter((item) => item.category === product.category && item.id !== product.id);
+  const otherProducts = products.filter((item) => item.category !== product.category && item.id !== product.id);
+  const carouselProducts = otherProducts.length > 1 ? [...otherProducts, ...otherProducts] : otherProducts;
 
   return (
     <>
@@ -1510,6 +2055,17 @@ function ProductPage({
               >
                 Reservar com 50%
               </button>
+              <button
+                className="product-button cart-detail-button"
+                type="button"
+                disabled={status.blocked}
+                onClick={() => onAddToCart(product)}
+                aria-label={`Adicionar ${product.name} ao carrinho`}
+                title="Adicionar ao carrinho"
+              >
+                <ShoppingCart size={17} aria-hidden="true" />
+                Carrinho
+              </button>
               <a className="product-button secondary" href={getWhatsAppUrl(settings)} target="_blank" rel="noreferrer">
                 Tirar dúvida
               </a>
@@ -1550,17 +2106,45 @@ function ProductPage({
               now={now}
               navigate={navigate}
               onCheckout={onCheckout}
+              onAddToCart={onAddToCart}
               isFavorite={favoriteIds.has(item.id)}
               onToggleFavorite={onToggleFavorite}
             />
           ))}
         </div>
       </section>
+
+      {otherProducts.length ? (
+        <section className="section more-products-section">
+          <SectionHeader
+            label="Demais produtos"
+            title="Demais produtos"
+            subtitle="Continue explorando outras categorias e ofertas disponiveis na iTech."
+          />
+          <div className="product-rail detail-carousel" aria-label="Demais produtos">
+            <div className={`product-track ${otherProducts.length > 1 ? '' : 'static-track'}`}>
+              {carouselProducts.map((item, index) => (
+                <ProductCard
+                  key={`${item.id}-other-${index}`}
+                  product={item}
+                  reservations={reservations}
+                  now={now}
+                  navigate={navigate}
+                  onCheckout={onCheckout}
+                  onAddToCart={onAddToCart}
+                  isFavorite={favoriteIds.has(item.id)}
+                  onToggleFavorite={onToggleFavorite}
+                />
+              ))}
+            </div>
+          </div>
+        </section>
+      ) : null}
     </>
   );
 }
 
-function HomeProductCard({ product, reservations, now, navigate, onCheckout, isFavorite, onToggleFavorite }) {
+function HomeProductCard({ product, reservations, now, navigate, onCheckout, onAddToCart, isFavorite, onToggleFavorite }) {
   const status = getProductStatus(product, reservations, now);
 
   return (
@@ -1578,15 +2162,26 @@ function HomeProductCard({ product, reservations, now, navigate, onCheckout, isF
         <p>{product.description}</p>
         <strong className="price">{currency.format(product.price)}</strong>
       </AppLink>
-      <button type="button" disabled={status.blocked} onClick={() => onCheckout(product, 'buy')}>
-        <ShoppingCart size={16} aria-hidden="true" />
-        Comprar agora
-      </button>
+      <div className="card-actions">
+        <button type="button" disabled={status.blocked} onClick={() => onCheckout(product, 'buy')}>
+          Comprar agora
+        </button>
+        <button
+          className="cart-icon-button"
+          type="button"
+          disabled={status.blocked}
+          onClick={() => onAddToCart(product)}
+          aria-label={`Adicionar ${product.name} ao carrinho`}
+          title="Adicionar ao carrinho"
+        >
+          <ShoppingCart size={16} aria-hidden="true" />
+        </button>
+      </div>
     </article>
   );
 }
 
-function ProductCard({ product, reservations, now, navigate, onCheckout, isFavorite, onToggleFavorite }) {
+function ProductCard({ product, reservations, now, navigate, onCheckout, onAddToCart, isFavorite, onToggleFavorite }) {
   const status = getProductStatus(product, reservations, now);
 
   return (
@@ -1620,6 +2215,16 @@ function ProductCard({ product, reservations, now, navigate, onCheckout, isFavor
           onClick={() => onCheckout(product, 'reserve')}
         >
           Reservar
+        </button>
+        <button
+          className="cart-icon-button"
+          type="button"
+          disabled={status.blocked}
+          onClick={() => onAddToCart(product)}
+          aria-label={`Adicionar ${product.name} ao carrinho`}
+          title="Adicionar ao carrinho"
+        >
+          <ShoppingCart size={16} aria-hidden="true" />
         </button>
       </div>
     </article>
@@ -1731,6 +2336,97 @@ function AuthRequiredPage({ navigate }) {
   );
 }
 
+function CartPage({ products, reservations, now, navigate, onRemove, onClear, onCheckout }) {
+  const rows = products.map((product) => ({
+    product,
+    status: getProductStatus(product, reservations, now)
+  }));
+  const availableRows = rows.filter((row) => !row.status.blocked);
+  const total = availableRows.reduce((sum, row) => sum + row.product.price, 0);
+
+  return (
+    <section className="cart-page">
+      <Breadcrumb navigate={navigate} items={[{ label: 'Inicio', to: '/' }]} current="Carrinho" />
+
+      <div className="cart-header">
+        <div>
+          <p className="section-label">Carrinho</p>
+          <h1>Produtos selecionados</h1>
+          <p>Revise os produtos antes de enviar um unico comprovante para a compra.</p>
+        </div>
+        {products.length ? (
+          <button className="button secondary" type="button" onClick={onClear}>
+            <Trash2 size={17} aria-hidden="true" />
+            Limpar
+          </button>
+        ) : null}
+      </div>
+
+      {products.length ? (
+        <div className="cart-layout">
+          <div className="cart-list">
+            {rows.map(({ product, status }) => (
+              <article className={`cart-item ${status.blocked ? 'is-blocked' : ''}`} key={product.id}>
+                <ProductVisual product={product} />
+                <div className="cart-item-copy">
+                  <div>
+                    <span className={`stock-badge ${status.blocked ? 'blocked' : 'available'}`}>
+                      {status.label}
+                    </span>
+                    <h2>{product.name}</h2>
+                    <p>{product.description}</p>
+                  </div>
+                  <div className="cart-item-meta">
+                    <span>{product.condition}</span>
+                    <span>{colorLabel(product.color)}</span>
+                  </div>
+                </div>
+                <div className="cart-item-actions">
+                  <strong>{currency.format(product.price)}</strong>
+                  <button type="button" onClick={() => onRemove(product.id)}>
+                    <Trash2 size={16} aria-hidden="true" />
+                    Remover
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+
+          <aside className="cart-summary">
+            <span className="section-label">Resumo</span>
+            <div className="cart-summary-line">
+              <span>Produtos disponiveis</span>
+              <strong>{availableRows.length}</strong>
+            </div>
+            <div className="cart-summary-line">
+              <span>Total</span>
+              <strong>{currency.format(total)}</strong>
+            </div>
+            {rows.length !== availableRows.length ? (
+              <p className="field-hint">Produtos indisponiveis nao entram no total.</p>
+            ) : null}
+            <button className="button primary" type="button" disabled={!availableRows.length} onClick={onCheckout}>
+              <ShoppingCart size={17} aria-hidden="true" />
+              Comprar carrinho
+            </button>
+            <AppLink className="button secondary" to="/produtos" navigate={navigate}>
+              Continuar comprando
+            </AppLink>
+          </aside>
+        </div>
+      ) : (
+        <div className="profile-empty cart-empty">
+          <ShoppingCart size={28} aria-hidden="true" />
+          <h2>Seu carrinho esta vazio</h2>
+          <AppLink className="button primary" to="/produtos" navigate={navigate}>
+            Ver produtos
+          </AppLink>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function UserAuthPage({ mode, navigate, onLogin, onRegister }) {
   const [form, setForm] = useState({ name: '', email: '', cpf: '', phone: '', password: '' });
   const isRegister = mode === 'register';
@@ -1825,6 +2521,362 @@ function UserAuthPage({ mode, navigate, onLogin, onRegister }) {
   );
 }
 
+function CustomerProfilePage({
+  db,
+  user,
+  favoriteProducts,
+  favoriteIds,
+  reservations,
+  now,
+  navigate,
+  onUpdateProfile,
+  onChangePassword,
+  onLogout,
+  onCheckout,
+  onAddToCart,
+  onToggleFavorite
+}) {
+  const [profileForm, setProfileForm] = useState({
+    name: user.name || '',
+    email: user.email || '',
+    phone: user.phone || '',
+    cpf: formatCpf(user.cpf)
+  });
+  const [editingProfile, setEditingProfile] = useState(false);
+  const [passwordForm, setPasswordForm] = useState({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: ''
+  });
+
+  useEffect(() => {
+    setProfileForm({
+      name: user.name || '',
+      email: user.email || '',
+      phone: user.phone || '',
+      cpf: formatCpf(user.cpf)
+    });
+    setEditingProfile(false);
+  }, [user.id, user.name, user.email, user.phone, user.cpf]);
+
+  const customerOrders = useMemo(() => {
+    const userCpf = normalizeCpf(user.cpf);
+    const userEmail = String(user.email || '').toLowerCase();
+
+    return db.orders
+      .filter((order) => {
+        const sameUserId = order.customerId && order.customerId === user.id;
+        const sameCpf = userCpf && normalizeCpf(order.customerCpf) === userCpf;
+        const sameEmail = userEmail && String(order.customerEmail || '').toLowerCase() === userEmail;
+        return sameUserId || sameCpf || sameEmail;
+      })
+      .sort((a, b) => orderTime(b) - orderTime(a));
+  }, [db.orders, user.cpf, user.email, user.id]);
+
+  const pendingOrders = customerOrders.filter((order) => order.status === 'pending').length;
+
+  function submitProfile(event) {
+    event.preventDefault();
+    const updated = onUpdateProfile(profileForm);
+    if (updated) {
+      setEditingProfile(false);
+    }
+  }
+
+  function startProfileEdit() {
+    setEditingProfile(true);
+  }
+
+  function cancelProfileEdit() {
+    setProfileForm({
+      name: user.name || '',
+      email: user.email || '',
+      phone: user.phone || '',
+      cpf: formatCpf(user.cpf)
+    });
+    setEditingProfile(false);
+  }
+
+  function submitPassword(event) {
+    event.preventDefault();
+    const changed = onChangePassword(passwordForm);
+    if (changed) {
+      setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+    }
+  }
+
+  function logoutAndLeave() {
+    onLogout();
+    navigate('/');
+  }
+
+  return (
+    <section className="profile-page">
+      <Breadcrumb navigate={navigate} items={[{ label: 'Inicio', to: '/' }]} current="Meu perfil" />
+
+      <div className="profile-header">
+        <div>
+          <p className="section-label">Minha conta</p>
+          <h1>Ola, {user.name}</h1>
+          <p>Dados, senha, pedidos e favoritos da sua conta iTech.</p>
+        </div>
+        <button className="button secondary" type="button" onClick={logoutAndLeave}>
+          <LogOut size={17} aria-hidden="true" />
+          Sair
+        </button>
+      </div>
+
+      <div className="profile-overview" aria-label="Resumo da conta">
+        <div className="profile-stat">
+          <UserRound size={20} aria-hidden="true" />
+          <span>CPF</span>
+          <strong>{formatCpf(user.cpf)}</strong>
+        </div>
+        <div className="profile-stat">
+          <PackageCheck size={20} aria-hidden="true" />
+          <span>Pedidos</span>
+          <strong>{customerOrders.length}</strong>
+          {pendingOrders ? <small>{pendingOrders} em validacao</small> : null}
+        </div>
+        <div className="profile-stat">
+          <Heart size={20} aria-hidden="true" />
+          <span>Favoritos</span>
+          <strong>{favoriteProducts.length}</strong>
+        </div>
+      </div>
+
+      <div className="profile-form-grid">
+        <form className="profile-card stack-form" onSubmit={submitProfile}>
+          <div className="profile-card-heading">
+            <UserRound size={20} aria-hidden="true" />
+            <h2>Dados pessoais</h2>
+          </div>
+          <div className="form-grid">
+            <label>
+              Nome
+              <input
+                required
+                disabled={!editingProfile}
+                value={profileForm.name}
+                onChange={(event) => setProfileForm({ ...profileForm, name: event.target.value })}
+              />
+            </label>
+            <label>
+              E-mail
+              <input
+                required
+                type="email"
+                disabled={!editingProfile}
+                value={profileForm.email}
+                onChange={(event) => setProfileForm({ ...profileForm, email: event.target.value })}
+              />
+            </label>
+            <label>
+              WhatsApp
+              <input
+                disabled={!editingProfile}
+                value={profileForm.phone}
+                onChange={(event) => setProfileForm({ ...profileForm, phone: event.target.value })}
+              />
+            </label>
+            <label>
+              CPF
+              <input value={profileForm.cpf} disabled />
+              <span className="field-hint">CPF nao pode ser alterado pelo site.</span>
+            </label>
+          </div>
+          <div className="profile-edit-actions">
+            {editingProfile ? (
+              <>
+                <button className="button primary profile-submit-button" type="submit">
+                  <Save size={17} aria-hidden="true" />
+                  Salvar dados
+                </button>
+                <button className="button secondary profile-submit-button" type="button" onClick={cancelProfileEdit}>
+                  Cancelar
+                </button>
+              </>
+            ) : (
+              <button className="button primary profile-submit-button" type="button" onClick={startProfileEdit}>
+                <UserRound size={17} aria-hidden="true" />
+                Editar dados
+              </button>
+            )}
+          </div>
+        </form>
+
+        <form className="profile-card stack-form" onSubmit={submitPassword}>
+          <div className="profile-card-heading">
+            <KeyRound size={20} aria-hidden="true" />
+            <h2>Alterar senha</h2>
+          </div>
+          <label>
+            Senha atual
+            <input
+              required
+              type="password"
+              value={passwordForm.currentPassword}
+              onChange={(event) => setPasswordForm({ ...passwordForm, currentPassword: event.target.value })}
+            />
+          </label>
+          <label>
+            Nova senha
+            <input
+              required
+              minLength={4}
+              type="password"
+              value={passwordForm.newPassword}
+              onChange={(event) => setPasswordForm({ ...passwordForm, newPassword: event.target.value })}
+            />
+          </label>
+          <label>
+            Confirmar nova senha
+            <input
+              required
+              minLength={4}
+              type="password"
+              value={passwordForm.confirmPassword}
+              onChange={(event) => setPasswordForm({ ...passwordForm, confirmPassword: event.target.value })}
+            />
+          </label>
+          <button className="button primary profile-submit-button" type="submit">
+            <KeyRound size={17} aria-hidden="true" />
+            Alterar senha
+          </button>
+        </form>
+      </div>
+
+      <section className="profile-section">
+        <div className="profile-section-header">
+          <div>
+            <p className="section-label">Historico</p>
+            <h2>Meus pedidos</h2>
+          </div>
+          <PackageCheck size={24} aria-hidden="true" />
+        </div>
+
+        {customerOrders.length ? (
+          <div className="order-list">
+            {customerOrders.map((order) => (
+              <article className="order-card" key={order.id}>
+                <div>
+                  <div className="order-title-row">
+                    <span className={`order-status ${order.status || 'pending'}`}>
+                      {orderStatusLabel(order.status)}
+                    </span>
+                    <small>{formatOrderDate(order.createdAt)}</small>
+                  </div>
+                  <h3>{order.productName}</h3>
+                  <p>
+                    {orderModeLabel(order)} - {currency.format(order.amount)}
+                  </p>
+                </div>
+                <dl className="order-details">
+                  <div>
+                    <dt>Comprovante</dt>
+                    <dd>
+                      {order.receiptDataUrl ? (
+                        <a
+                          className="receipt-download-link"
+                          href={order.receiptDataUrl}
+                          download={order.receiptName || `comprovante-${order.id}`}
+                        >
+                          Baixar comprovante
+                        </a>
+                      ) : (
+                        order.receiptName || 'Pendente'
+                      )}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Pagamento</dt>
+                    <dd>{order.percent === 50 ? '50% do valor' : '100% do valor'}</dd>
+                  </div>
+                </dl>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <div className="profile-empty">
+            <ShoppingBag size={26} aria-hidden="true" />
+            <h3>Nenhum pedido ainda</h3>
+            <AppLink className="button primary" to="/produtos" navigate={navigate}>
+              Ver produtos
+            </AppLink>
+          </div>
+        )}
+      </section>
+
+      <section className="profile-section">
+        <div className="profile-section-header">
+          <div>
+            <p className="section-label">Lista salva</p>
+            <h2>Produtos favoritados</h2>
+          </div>
+          <Heart size={24} aria-hidden="true" />
+        </div>
+
+        {favoriteProducts.length ? (
+          <div className="profile-product-grid">
+            {favoriteProducts.map((product) => (
+              <ProductCard
+                key={product.id}
+                product={product}
+                reservations={reservations}
+                now={now}
+                navigate={navigate}
+                onCheckout={onCheckout}
+                onAddToCart={onAddToCart}
+                isFavorite={favoriteIds.has(product.id)}
+                onToggleFavorite={onToggleFavorite}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="profile-empty">
+            <Heart size={26} aria-hidden="true" />
+            <h3>Nenhum favorito salvo</h3>
+            <AppLink className="button primary" to="/produtos" navigate={navigate}>
+              Explorar produtos
+            </AppLink>
+          </div>
+        )}
+      </section>
+    </section>
+  );
+}
+
+function orderTime(order) {
+  const timestamp = new Date(order.validatedAt || order.createdAt || 0).getTime();
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
+function orderStatusLabel(status) {
+  if (status === 'validated') return 'Validado';
+  if (status === 'pending') return 'Em validacao';
+  return 'Recebido';
+}
+
+function orderModeLabel(order) {
+  if (order.mode === 'cart') return 'Compra pelo carrinho';
+  return order.mode === 'reserve' ? `Reserva ${order.percent || 50}%` : 'Compra';
+}
+
+function formatOrderDate(value) {
+  if (!value) return 'Data indisponivel';
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Data indisponivel';
+
+  return date.toLocaleString('pt-BR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
 function AdminPage({ db, currentAdmin, navigate, onLogin, onRegister, onLogout, updateDb, setNotice }) {
   if (!currentAdmin) {
     return <AdminAuth onLogin={onLogin} onRegister={onRegister} navigate={navigate} />;
@@ -1838,6 +2890,34 @@ function AdminPage({ db, currentAdmin, navigate, onLogin, onRegister, onLogout, 
       updateDb={updateDb}
       setNotice={setNotice}
     />
+  );
+}
+
+function AdminForbiddenPage({ navigate, onLogout }) {
+  function logoutAndGoHome() {
+    onLogout();
+    navigate('/');
+  }
+
+  return (
+    <section className="auth-page">
+      <div className="auth-card">
+        <p className="section-label">Area restrita</p>
+        <h1>Acesso administrativo bloqueado</h1>
+        <p className="auth-copy">
+          Esta conta esta conectada como cliente. Para entrar no painel admin, saia da conta de cliente e faca login
+          com uma conta administrativa aprovada.
+        </p>
+        <div className="auth-actions">
+          <button className="button primary" type="button" onClick={() => navigate('/perfil')}>
+            Voltar ao perfil
+          </button>
+          <button className="button secondary" type="button" onClick={logoutAndGoHome}>
+            Sair da conta
+          </button>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -1932,7 +3012,7 @@ function AdminAuth({ onLogin, onRegister, navigate }) {
 }
 
 function AdminPanel({ db, admin, onLogout, updateDb, setNotice }) {
-  const [tab, setTab] = useState('settings');
+  const [tab, setTab] = useState('dashboard');
 
   return (
     <section className="admin-page">
@@ -1948,6 +3028,7 @@ function AdminPanel({ db, admin, onLogout, updateDb, setNotice }) {
 
       <div className="admin-tabs">
         {[
+          ['dashboard', 'Dashboard'],
           ['settings', 'Sistema'],
           ['products', 'Produtos'],
           ['categories', 'Categorias'],
@@ -1961,6 +3042,7 @@ function AdminPanel({ db, admin, onLogout, updateDb, setNotice }) {
         ))}
       </div>
 
+      {tab === 'dashboard' ? <DashboardManager db={db} /> : null}
       {tab === 'settings' ? <SettingsManager db={db} updateDb={updateDb} setNotice={setNotice} /> : null}
       {tab === 'products' ? <ProductManager db={db} updateDb={updateDb} setNotice={setNotice} /> : null}
       {tab === 'categories' ? <CategoryManager db={db} updateDb={updateDb} setNotice={setNotice} /> : null}
@@ -1969,6 +3051,389 @@ function AdminPanel({ db, admin, onLogout, updateDb, setNotice }) {
       {tab === 'admins' ? <AdminApproval db={db} updateDb={updateDb} setNotice={setNotice} /> : null}
     </section>
   );
+}
+
+function DashboardManager({ db }) {
+  const nowDate = new Date();
+  const todayStart = startOfDay(nowDate);
+  const monthStart = startOfMonth(nowDate);
+  const yearStart = startOfYear(nowDate);
+  const weekStart = new Date(todayStart);
+  weekStart.setDate(weekStart.getDate() - 6);
+
+  const orders = Array.isArray(db.orders) ? db.orders : [];
+  const sales = orders.filter((order) => order.status === 'validated');
+  const pendingOrders = orders.filter((order) => order.status === 'pending');
+  const visits = db.analytics?.visits || [];
+  const userVisits = visits.filter((visit) => visit.role === 'user');
+  const guestVisits = visits.filter((visit) => visit.role === 'guest');
+  const adminVisits = visits.filter((visit) => visit.role === 'admin');
+
+  const todaySales = sales.filter((order) => getDateKey(order.validatedAt || order.createdAt) === getDateKey(nowDate));
+  const weekSales = sales.filter((order) => isDateOnOrAfter(order.validatedAt || order.createdAt, weekStart));
+  const monthSales = sales.filter((order) => isDateOnOrAfter(order.validatedAt || order.createdAt, monthStart));
+  const yearSales = sales.filter((order) => isDateOnOrAfter(order.validatedAt || order.createdAt, yearStart));
+  const grossRevenue = sumOrderAmounts(sales);
+  const averageTicket = sales.length ? grossRevenue / sales.length : 0;
+  const soldUnits = sales.reduce((total, order) => total + getOrderItems(order).length, 0);
+
+  const usersToday = db.users.filter((user) => user.createdAt && getDateKey(user.createdAt) === getDateKey(nowDate));
+  const usersMonth = db.users.filter((user) => user.createdAt && isDateOnOrAfter(user.createdAt, monthStart));
+  const loggedVisitsToday = userVisits.filter((visit) => visit.dateKey === getDateKey(nowDate));
+  const loggedVisitsMonth = userVisits.filter((visit) => isDateOnOrAfter(visit.createdAt, monthStart));
+  const allVisitsToday = visits.filter((visit) => visit.dateKey === getDateKey(nowDate));
+  const activeUsersToday = countUnique(loggedVisitsToday, (visit) => visit.userId);
+  const activeUsersMonth = countUnique(loggedVisitsMonth, (visit) => visit.userId);
+
+  const days = Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(weekStart);
+    date.setDate(weekStart.getDate() + index);
+    const key = getDateKey(date);
+    const daySales = sales.filter((order) => getDateKey(order.validatedAt || order.createdAt) === key);
+    const dayUserVisits = userVisits.filter((visit) => visit.dateKey === key);
+    const dayGuestVisits = guestVisits.filter((visit) => visit.dateKey === key);
+
+    return {
+      key,
+      label: formatShortDate(date),
+      salesCount: daySales.length,
+      revenue: sumOrderAmounts(daySales),
+      loggedVisits: dayUserVisits.length,
+      guestVisits: dayGuestVisits.length,
+      activeUsers: countUnique(dayUserVisits, (visit) => visit.userId)
+    };
+  });
+
+  const maxRevenue = Math.max(...days.map((day) => day.revenue), 1);
+  const maxAccesses = Math.max(...days.map((day) => day.loggedVisits + day.guestVisits), 1);
+  const productRanking = buildProductRanking(sales);
+  const categoryRanking = buildCategoryRanking(sales, db.products, db.categories);
+  const inventory = {
+    available: db.products.filter((product) => product.saleStatus === 'available').length,
+    sold: db.products.filter((product) => product.saleStatus === 'sold').length,
+    out: db.products.filter((product) => product.saleStatus === 'out_of_stock').length
+  };
+  const recentSales = [...sales]
+    .sort((a, b) => getOrderTime(b) - getOrderTime(a))
+    .slice(0, 6);
+
+  return (
+    <div className="dashboard">
+      <div className="dashboard-grid">
+        <DashboardStat
+          icon={DollarSign}
+          label="Valor bruto"
+          value={currency.format(grossRevenue)}
+          detail={`${sales.length} venda(s) validadas`}
+        />
+        <DashboardStat
+          icon={CalendarDays}
+          label="Vendas hoje"
+          value={todaySales.length}
+          detail={currency.format(sumOrderAmounts(todaySales))}
+        />
+        <DashboardStat
+          icon={TrendingUp}
+          label="Vendas no mes"
+          value={monthSales.length}
+          detail={currency.format(sumOrderAmounts(monthSales))}
+        />
+        <DashboardStat
+          icon={BarChart3}
+          label="Vendas no ano"
+          value={yearSales.length}
+          detail={currency.format(sumOrderAmounts(yearSales))}
+        />
+        <DashboardStat
+          icon={Users}
+          label="Usuarios cadastrados"
+          value={db.users.length}
+          detail={`${usersToday.length} hoje, ${usersMonth.length} no mes`}
+        />
+        <DashboardStat
+          icon={Eye}
+          label="Acessos logados hoje"
+          value={loggedVisitsToday.length}
+          detail={`${activeUsersToday} usuario(s) ativos`}
+        />
+        <DashboardStat
+          icon={ShoppingCart}
+          label="Ticket medio"
+          value={currency.format(averageTicket)}
+          detail={`${soldUnits} item(ns) vendidos`}
+        />
+        <DashboardStat
+          icon={PackageCheck}
+          label="Comprovantes pendentes"
+          value={pendingOrders.length}
+          detail={`${weekSales.length} venda(s) nos ultimos 7 dias`}
+        />
+      </div>
+
+      <div className="dashboard-columns">
+        <section className="dashboard-card">
+          <div className="dashboard-card-header">
+            <div>
+              <p className="section-label">Ultimos 7 dias</p>
+              <h2>Vendas semanais</h2>
+            </div>
+            <strong>{currency.format(sumOrderAmounts(weekSales))}</strong>
+          </div>
+          <div className="bar-chart">
+            {days.map((day) => (
+              <div className="bar-item" key={day.key}>
+                <span>{day.label}</span>
+                <div className="bar-track">
+                  <span style={{ width: `${Math.max((day.revenue / maxRevenue) * 100, day.revenue ? 8 : 0)}%` }} />
+                </div>
+                <strong>{day.salesCount}</strong>
+                <small>{currency.format(day.revenue)}</small>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="dashboard-card">
+          <div className="dashboard-card-header">
+            <div>
+              <p className="section-label">Acessos</p>
+              <h2>Usuarios por dia</h2>
+            </div>
+            <strong>{activeUsersMonth} ativos no mes</strong>
+          </div>
+          <div className="access-chart">
+            {days.map((day) => (
+              <div className="access-day" key={day.key}>
+                <span>{day.label}</span>
+                <div className="stacked-bar">
+                  <span
+                    className="logged"
+                    style={{ width: `${Math.max((day.loggedVisits / maxAccesses) * 100, day.loggedVisits ? 8 : 0)}%` }}
+                  />
+                  <span
+                    className="guest"
+                    style={{ width: `${Math.max((day.guestVisits / maxAccesses) * 100, day.guestVisits ? 8 : 0)}%` }}
+                  />
+                </div>
+                <small>{day.loggedVisits} logados / {day.guestVisits} visitantes</small>
+              </div>
+            ))}
+          </div>
+          <p className="dashboard-note">
+            Acessos logados contam apenas clientes conectados. Visitantes tambem sao registrados separadamente.
+          </p>
+        </section>
+      </div>
+
+      <div className="dashboard-columns">
+        <section className="dashboard-card">
+          <div className="dashboard-card-header">
+            <div>
+              <p className="section-label">Produtos</p>
+              <h2>Mais vendidos</h2>
+            </div>
+          </div>
+          <DashboardRanking
+            rows={productRanking}
+            empty="Nenhum produto vendido ainda."
+            valueLabel={(row) => `${row.count} venda(s) - ${currency.format(row.revenue)}`}
+          />
+        </section>
+
+        <section className="dashboard-card">
+          <div className="dashboard-card-header">
+            <div>
+              <p className="section-label">Categorias</p>
+              <h2>Receita por categoria</h2>
+            </div>
+          </div>
+          <DashboardRanking
+            rows={categoryRanking}
+            empty="Nenhuma categoria vendida ainda."
+            valueLabel={(row) => `${row.count} item(ns) - ${currency.format(row.revenue)}`}
+          />
+        </section>
+      </div>
+
+      <div className="dashboard-columns">
+        <section className="dashboard-card">
+          <div className="dashboard-card-header">
+            <div>
+              <p className="section-label">Estoque</p>
+              <h2>Status dos produtos</h2>
+            </div>
+          </div>
+          <div className="inventory-grid">
+            <div>
+              <span>Disponiveis</span>
+              <strong>{inventory.available}</strong>
+            </div>
+            <div>
+              <span>Vendidos</span>
+              <strong>{inventory.sold}</strong>
+            </div>
+            <div>
+              <span>Esgotados</span>
+              <strong>{inventory.out}</strong>
+            </div>
+          </div>
+        </section>
+
+        <section className="dashboard-card">
+          <div className="dashboard-card-header">
+            <div>
+              <p className="section-label">Movimento</p>
+              <h2>Resumo de acessos</h2>
+            </div>
+          </div>
+          <div className="inventory-grid">
+            <div>
+              <span>Hoje</span>
+              <strong>{allVisitsToday.length}</strong>
+            </div>
+            <div>
+              <span>Clientes hoje</span>
+              <strong>{activeUsersToday}</strong>
+            </div>
+            <div>
+              <span>Admins</span>
+              <strong>{adminVisits.length}</strong>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <section className="dashboard-card">
+        <div className="dashboard-card-header">
+          <div>
+            <p className="section-label">Ultimas vendas</p>
+            <h2>Historico recente</h2>
+          </div>
+        </div>
+        {recentSales.length ? (
+          <div className="dashboard-sales-list">
+            {recentSales.map((order) => (
+              <div className="dashboard-sale-row" key={order.id}>
+                <span>
+                  <strong>{order.productName}</strong>
+                  <small>
+                    {order.customerName} - {formatOrderDate(order.validatedAt || order.createdAt)}
+                  </small>
+                </span>
+                <strong>{currency.format(order.amount)}</strong>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="muted">Nenhuma venda validada ainda.</p>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function DashboardStat({ icon: Icon, label, value, detail }) {
+  return (
+    <article className="dashboard-stat">
+      <Icon size={21} aria-hidden="true" />
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{detail}</small>
+    </article>
+  );
+}
+
+function DashboardRanking({ rows, empty, valueLabel }) {
+  if (!rows.length) return <p className="muted">{empty}</p>;
+
+  return (
+    <div className="dashboard-ranking">
+      {rows.map((row, index) => (
+        <div className="dashboard-rank-row" key={row.id || row.label}>
+          <span>{index + 1}</span>
+          <div>
+            <strong>{row.label}</strong>
+            <small>{valueLabel(row)}</small>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function sumOrderAmounts(orders) {
+  return orders.reduce((total, order) => total + Number(order.amount || 0), 0);
+}
+
+function getOrderItems(order) {
+  if (Array.isArray(order.items) && order.items.length) return order.items;
+  if (Array.isArray(order.productIds) && order.productIds.length) {
+    const splitAmount = Number(order.amount || 0) / order.productIds.length;
+    return order.productIds.map((productId, index) => ({
+      productId,
+      productName: index === 0 ? order.productName : `Produto ${index + 1}`,
+      amount: splitAmount
+    }));
+  }
+
+  return [
+    {
+      productId: order.productId || order.id,
+      productName: order.productName || 'Produto',
+      amount: Number(order.amount || 0)
+    }
+  ];
+}
+
+function buildProductRanking(sales) {
+  const ranking = new Map();
+
+  sales.forEach((order) => {
+    getOrderItems(order).forEach((item) => {
+      const key = item.productId || item.productName;
+      const current = ranking.get(key) || {
+        id: key,
+        label: item.productName || order.productName || 'Produto',
+        count: 0,
+        revenue: 0
+      };
+
+      current.count += 1;
+      current.revenue += Number(item.amount || 0);
+      ranking.set(key, current);
+    });
+  });
+
+  return Array.from(ranking.values()).sort((a, b) => b.revenue - a.revenue).slice(0, 6);
+}
+
+function buildCategoryRanking(sales, products, categories) {
+  const productMap = new Map(products.map((product) => [product.id, product]));
+  const categoryMap = new Map(categories.map((category) => [category.slug, category.name]));
+  const ranking = new Map();
+
+  sales.forEach((order) => {
+    getOrderItems(order).forEach((item) => {
+      const product = productMap.get(item.productId);
+      const categorySlug = product?.category || 'sem-categoria';
+      const current = ranking.get(categorySlug) || {
+        id: categorySlug,
+        label: categoryMap.get(categorySlug) || 'Sem categoria',
+        count: 0,
+        revenue: 0
+      };
+
+      current.count += 1;
+      current.revenue += Number(item.amount || 0);
+      ranking.set(categorySlug, current);
+    });
+  });
+
+  return Array.from(ranking.values()).sort((a, b) => b.revenue - a.revenue).slice(0, 6);
+}
+
+function countUnique(items, getKey) {
+  return new Set(items.map(getKey).filter(Boolean)).size;
 }
 
 function SettingsManager({ db, updateDb, setNotice }) {
@@ -2380,13 +3845,18 @@ function CategoryManager({ db, updateDb, setNotice }) {
 
 function ReceiptManager({ db, updateDb, setNotice }) {
   const pending = db.orders.filter((order) => order.status === 'pending');
+  const [previewOrder, setPreviewOrder] = useState(null);
 
   function validate(order) {
     updateDb((current) => {
-      const product = current.products.find((item) => item.id === order.productId);
-      const saleStatus = product?.condition === 'Novo' ? 'out_of_stock' : 'sold';
+      const orderProductIds = Array.isArray(order.productIds) && order.productIds.length
+        ? order.productIds
+        : [order.productId].filter(Boolean);
+      const orderProductSet = new Set(orderProductIds);
       const reservations = { ...current.reservations };
-      delete reservations[order.productId];
+      orderProductIds.forEach((productId) => {
+        delete reservations[productId];
+      });
 
       return {
         ...current,
@@ -2396,15 +3866,18 @@ function ReceiptManager({ db, updateDb, setNotice }) {
             ? { ...item, status: 'validated', validatedAt: new Date().toISOString() }
             : item
         ),
-        products: current.products.map((item) =>
-          item.id === order.productId ? { ...item, saleStatus } : item
-        )
+        products: current.products.map((item) => {
+          if (!orderProductSet.has(item.id)) return item;
+          return { ...item, saleStatus: item.condition === 'Novo' ? 'out_of_stock' : 'sold' };
+        })
       };
     });
+    setPreviewOrder(null);
     setNotice('Venda validada e enviada para vendas realizadas.');
   }
 
   return (
+    <>
     <div className="admin-card">
       <h2>Comprovantes para validar</h2>
       {pending.length ? (
@@ -2419,6 +3892,10 @@ function ReceiptManager({ db, updateDb, setNotice }) {
                   {order.receiptName}
                 </small>
               </span>
+              <button type="button" onClick={() => setPreviewOrder(order)}>
+                <Eye size={15} aria-hidden="true" />
+                Visualizar
+              </button>
               <button className="approve" type="button" onClick={() => validate(order)}>
                 <Check size={15} aria-hidden="true" />
                 Validar
@@ -2429,6 +3906,87 @@ function ReceiptManager({ db, updateDb, setNotice }) {
       ) : (
         <p className="muted">Nenhum comprovante pendente.</p>
       )}
+    </div>
+    {previewOrder ? (
+      <ReceiptPreviewModal
+        order={previewOrder}
+        onClose={() => setPreviewOrder(null)}
+        onValidate={() => validate(previewOrder)}
+      />
+    ) : null}
+    </>
+  );
+}
+
+function ReceiptPreviewModal({ order, onClose, onValidate }) {
+  const receiptType = order.receiptType || '';
+  const canPreview = Boolean(order.receiptDataUrl);
+  const isImage = receiptType.startsWith('image/');
+  const isPdf = receiptType === 'application/pdf' || order.receiptName?.toLowerCase().endsWith('.pdf');
+
+  return (
+    <div className="modal" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="modal-card receipt-preview-card" role="dialog" aria-modal="true" aria-labelledby="receipt-preview-title">
+        <div className="modal-header">
+          <div>
+            <span className="product-badge">Comprovante</span>
+            <h2 id="receipt-preview-title">{order.productName}</h2>
+          </div>
+          <button className="close-button" type="button" onClick={onClose} aria-label="Fechar">
+            <X size={18} aria-hidden="true" />
+          </button>
+        </div>
+
+        <div className="modal-body">
+          <div className="pix-box">
+            <InfoLine label="Cliente" value={order.customerName || 'Nao informado'} />
+            <InfoLine label="CPF" value={order.customerCpf ? formatCpf(order.customerCpf) : 'Nao informado'} />
+            <InfoLine label="E-mail" value={order.customerEmail || 'Nao informado'} />
+            <InfoLine label="Valor" value={currency.format(order.amount)} />
+            <InfoLine label="Arquivo" value={order.receiptName || 'Sem nome'} />
+          </div>
+
+          <div className="receipt-preview-frame">
+            {canPreview && isImage ? (
+              <img src={order.receiptDataUrl} alt={`Comprovante de ${order.customerName || order.productName}`} />
+            ) : null}
+
+            {canPreview && isPdf ? (
+              <iframe title="Comprovante em PDF" src={order.receiptDataUrl} />
+            ) : null}
+
+            {canPreview && !isImage && !isPdf ? (
+              <div className="receipt-preview-empty">
+                <FileText size={26} aria-hidden="true" />
+                <p>Este tipo de arquivo nao tem pre-visualizacao no navegador.</p>
+                <a className="button secondary" href={order.receiptDataUrl} target="_blank" rel="noreferrer">
+                  Abrir arquivo
+                </a>
+              </div>
+            ) : null}
+
+            {!canPreview ? (
+              <div className="receipt-preview-empty">
+                <FileText size={26} aria-hidden="true" />
+                <p>Este pedido foi enviado antes da pre-visualizacao ser salva.</p>
+              </div>
+            ) : null}
+          </div>
+
+          <div className="modal-actions">
+            {canPreview ? (
+              <a className="button secondary" href={order.receiptDataUrl} target="_blank" rel="noreferrer">
+                <Eye size={17} aria-hidden="true" />
+                Abrir em nova aba
+              </a>
+            ) : null}
+            <button className="button primary" type="button" onClick={onValidate}>
+              <Check size={17} aria-hidden="true" />
+              Validar comprovante
+            </button>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
@@ -2505,11 +4063,23 @@ function categoryLabel(categories, slug) {
 }
 
 function CheckoutModal({ product, reservation, settings, now, onClose, onReceipt, onCopyPix }) {
+  const [selectedReceipt, setSelectedReceipt] = useState(null);
+
+  useEffect(() => {
+    setSelectedReceipt(null);
+  }, [product?.id, reservation?.orderId, reservation?.proofAttached]);
+
   if (!product || !reservation) return null;
 
   const remaining = reservation.expiresAt ? reservation.expiresAt - now : 0;
   const amountLabel = reservation.percent === 50 ? '50% do valor' : '100% do valor';
   const stockLabel = product.condition === 'Novo' ? 'Esgotado' : 'Vendido';
+
+  function sendReceipt() {
+    if (!selectedReceipt) return;
+    onReceipt(selectedReceipt);
+    setSelectedReceipt(null);
+  }
 
   return (
     <div className="modal" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -2528,8 +4098,8 @@ function CheckoutModal({ product, reservation, settings, now, onClose, onReceipt
           <div className="timer-box">
             <strong className="timer">{reservation.proofAttached ? 'OK' : formatTimer(remaining)}</strong>
             <p>
-              Produto reservado por 5 minutos, realize o pix para essa chave abaixo e clique em
-              anexar comprovante para concluir a compra.
+              Produto reservado por 5 minutos. Realize o Pix, escolha o arquivo e depois clique em
+              enviar comprovante para concluir.
             </p>
           </div>
 
@@ -2542,26 +4112,128 @@ function CheckoutModal({ product, reservation, settings, now, onClose, onReceipt
           </div>
 
           <div className="modal-actions">
-            <label className="file-button">
-              <Upload size={17} aria-hidden="true" />
-              Anexar comprovante
-              <input type="file" accept="image/*,.pdf" onChange={(event) => onReceipt(event.target.files?.[0])} />
-            </label>
+            {!reservation.proofAttached ? (
+              <>
+                <label className="file-button">
+                  <Upload size={17} aria-hidden="true" />
+                  Escolher comprovante
+                  <input
+                    type="file"
+                    accept="image/*,.pdf"
+                    onChange={(event) => setSelectedReceipt(event.target.files?.[0] || null)}
+                  />
+                </label>
+                <button className="button primary" type="button" disabled={!selectedReceipt} onClick={sendReceipt}>
+                  <Upload size={17} aria-hidden="true" />
+                  Enviar comprovante
+                </button>
+              </>
+            ) : null}
             <button className="button secondary" type="button" onClick={onCopyPix}>
               <Copy size={17} aria-hidden="true" />
               Copiar chave Pix
             </button>
-            <a className="button primary" href={getWhatsAppUrl(settings)} target="_blank" rel="noreferrer">
+            <a className="button secondary" href={getWhatsAppUrl(settings)} target="_blank" rel="noreferrer">
               <MessageCircle size={17} aria-hidden="true" />
               WhatsApp
             </a>
           </div>
+
+          {selectedReceipt && !reservation.proofAttached ? (
+            <p className="selected-receipt">Arquivo selecionado: {selectedReceipt.name}</p>
+          ) : null}
 
           {reservation.proofAttached ? (
             <p className="modal-feedback">
               Comprovante anexado: {reservation.receiptName || 'arquivo recebido'}. Aguardando
               validação do administrador.
             </p>
+          ) : null}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function CartCheckoutModal({ products, reservations, settings, now, onClose, onReceipt, onCopyPix }) {
+  const [selectedReceipt, setSelectedReceipt] = useState(null);
+
+  useEffect(() => {
+    setSelectedReceipt(null);
+  }, [products.map((product) => product.id).join('|')]);
+
+  if (!products.length) return null;
+
+  const activeReservations = products.map((product) => reservations?.[product.id]).filter(Boolean);
+  const total = activeReservations.reduce((sum, reservation) => sum + (reservation.amount || 0), 0);
+  const expiresAt = activeReservations
+    .map((reservation) => reservation.expiresAt)
+    .filter(Boolean)
+    .sort((a, b) => a - b)[0];
+  const remaining = expiresAt ? expiresAt - now : 0;
+  const productList = products.map((product) => product.name).join(', ');
+
+  function sendReceipt() {
+    if (!selectedReceipt) return;
+    onReceipt(selectedReceipt);
+    setSelectedReceipt(null);
+  }
+
+  return (
+    <div className="modal" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="cart-checkout-title">
+        <div className="modal-header">
+          <div>
+            <span className="product-badge">{products.length} produto(s)</span>
+            <h2 id="cart-checkout-title">Compra do carrinho</h2>
+          </div>
+          <button className="close-button" type="button" onClick={onClose} aria-label="Fechar">
+            <X size={18} aria-hidden="true" />
+          </button>
+        </div>
+
+        <div className="modal-body">
+          <div className="timer-box">
+            <strong className="timer">{formatTimer(remaining)}</strong>
+            <p>
+              Os produtos do carrinho foram reservados por 5 minutos. Realize o Pix do total,
+              escolha o arquivo e depois envie o comprovante.
+            </p>
+          </div>
+
+          <div className="pix-box">
+            <InfoLine label="Produtos" value={productList} />
+            <InfoLine label="Pagamento solicitado" value="100% do valor" />
+            <InfoLine label="Valor Pix" value={currency.format(total)} />
+            <InfoLine label="Chave Pix" value={settings.pixKey} />
+          </div>
+
+          <div className="modal-actions">
+            <label className="file-button">
+              <Upload size={17} aria-hidden="true" />
+              Escolher comprovante
+              <input
+                type="file"
+                accept="image/*,.pdf"
+                onChange={(event) => setSelectedReceipt(event.target.files?.[0] || null)}
+              />
+            </label>
+            <button className="button primary" type="button" disabled={!selectedReceipt} onClick={sendReceipt}>
+              <Upload size={17} aria-hidden="true" />
+              Enviar comprovante
+            </button>
+            <button className="button secondary" type="button" onClick={onCopyPix}>
+              <Copy size={17} aria-hidden="true" />
+              Copiar chave Pix
+            </button>
+            <a className="button secondary" href={getWhatsAppUrl(settings)} target="_blank" rel="noreferrer">
+              <MessageCircle size={17} aria-hidden="true" />
+              WhatsApp
+            </a>
+          </div>
+
+          {selectedReceipt ? (
+            <p className="selected-receipt">Arquivo selecionado: {selectedReceipt.name}</p>
           ) : null}
         </div>
       </section>
