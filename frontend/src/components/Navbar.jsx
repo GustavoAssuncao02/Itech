@@ -1,4 +1,5 @@
 import { ShoppingBag } from 'lucide-react';
+import itechLogo from '../assets/logo.jpg';
 
 export default function Navbar({ categories, storeName, status }) {
   return (
@@ -6,8 +7,7 @@ export default function Navbar({ categories, storeName, status }) {
       <div className="top-line" />
       <nav className="nav-shell" aria-label="Navegação principal">
         <a className="brand" href="#top" aria-label={`${storeName} início`}>
-          <span>{storeName.slice(0, 1)}</span>
-          {storeName.slice(1)}
+          <img src={itechLogo} alt={storeName} />
         </a>
 
         <div className="nav-links">

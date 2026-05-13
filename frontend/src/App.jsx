@@ -25,6 +25,7 @@ import {
   Watch,
   X
 } from 'lucide-react';
+import itechLogo from './assets/logo.jpg';
 
 const DB_KEY = 'itech_store_db_v3';
 const CURRENT_USER_KEY = 'itech_current_user_id';
@@ -1177,8 +1178,7 @@ function Navbar({ settings, categories, currentUser, favoriteCount, route, navig
       <div className="top-line" />
       <nav className="nav-shell" aria-label="Navegação principal">
         <AppLink className="brand" to="/" navigate={navigate} aria-label={`${settings.storeName} início`}>
-          <span>{settings.storeName.slice(0, 1)}</span>
-          {settings.storeName.slice(1)}
+          <img src={itechLogo} alt={settings.storeName} />
         </AppLink>
 
         <div className="nav-links">
