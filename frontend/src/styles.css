@@ -887,6 +887,31 @@ input {
   border-radius: 999px;
 }
 
+.stock-swatch-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.stock-swatch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 0 8px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.stock-swatch.is-empty {
+  opacity: 0.48;
+}
+
 .price {
   display: block;
   margin-top: auto;
@@ -1222,6 +1247,17 @@ input {
   border-color: rgba(0, 113, 227, 0.42);
 }
 
+.swatch-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.swatch-option small {
+  color: inherit;
+  font-size: 0.74rem;
+  font-weight: 900;
+}
+
 .swatch {
   width: 14px;
   height: 14px;
@@ -1431,6 +1467,18 @@ input {
   margin-top: 8px;
   color: var(--muted);
   font-weight: 800;
+}
+
+.color-selector {
+  display: grid;
+  gap: 10px;
+  margin-top: 24px;
+}
+
+.color-selector > strong {
+  font-size: 0.86rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .detail-actions {
@@ -2325,7 +2373,8 @@ input {
 }
 
 .admin-card .admin-submit-button,
-.product-form .product-submit-button {
+.product-form .product-submit-button,
+.product-form .form-actions .button.secondary {
   flex: 0 0 auto !important;
   width: auto !important;
   max-width: max-content !important;
@@ -2333,9 +2382,13 @@ input {
   min-height: 38px !important;
   padding: 0 14px !important;
   border-radius: 999px !important;
-  box-shadow: 0 8px 18px rgba(0, 113, 227, 0.16) !important;
   font-size: 0.88rem !important;
   line-height: 1 !important;
+}
+
+.admin-card .admin-submit-button,
+.product-form .product-submit-button {
+  box-shadow: 0 8px 18px rgba(0, 113, 227, 0.16) !important;
 }
 
 .product-form input::placeholder,
@@ -2687,6 +2740,54 @@ input {
   border: 1px solid var(--line);
   border-radius: 999px;
   cursor: pointer;
+}
+
+.stock-editor {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.stock-editor-heading {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.stock-editor-heading small {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.stock-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 150px 42px;
+  gap: 10px;
+  align-items: end;
+}
+
+.stock-row button {
+  display: inline-grid;
+  place-items: center;
+  width: 42px;
+  min-height: 42px;
+  color: var(--red);
+  background: var(--white);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.stock-row button:hover {
+  border-color: rgba(239, 68, 68, 0.38);
+}
+
+.stock-add-button {
+  justify-self: start;
 }
 
 .admin-list {

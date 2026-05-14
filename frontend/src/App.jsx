@@ -36,6 +36,7 @@ import {
   Watch,
   X
 } from 'lucide-react';
+import { uploadProductImages } from './api.js';
 import itechLogo from './assets/logo.jpg';
 
 const DB_KEY = 'itech_store_db_v3';
@@ -568,15 +569,77 @@ function normalizeProductImages(product) {
     .filter(Boolean);
 }
 
+function normalizeQuantity(value) {
+  const quantity = Number.parseInt(value, 10);
+  return Number.isFinite(quantity) && quantity > 0 ? quantity : 0;
+}
+
+function getStockRowId(productId, color, index) {
+  return `${productId || 'product'}-${color || 'color'}-stock-${index + 1}`;
+}
+
+function normalizeProductStock(product) {
+  const sourceStock = Array.isArray(product?.stock)
+    ? product.stock
+    : Array.isArray(product?.inventory)
+      ? product.inventory
+      : [];
+
+  if (!sourceStock.length) {
+    const fallbackColor = product?.color || 'black';
+    const fallbackQuantity =
+      product?.saleStatus === 'sold' || product?.saleStatus === 'out_of_stock'
+        ? 0
+        : normalizeQuantity(product?.quantity ?? product?.stockQuantity ?? 1);
+
+    return [
+      {
+        id: getStockRowId(product?.id, fallbackColor, 0),
+        color: fallbackColor,
+        quantity: fallbackQuantity
+      }
+    ];
+  }
+
+  const byColor = new Map();
+
+  sourceStock.forEach((entry, index) => {
+    const color = entry?.color || product?.color || 'black';
+    const current = byColor.get(color) || {
+      id: entry?.id || getStockRowId(product?.id, color, index),
+      color,
+      quantity: 0
+    };
+
+    current.quantity += normalizeQuantity(entry?.quantity ?? entry?.units ?? entry?.available);
+    byColor.set(color, current);
+  });
+
+  return Array.from(byColor.values());
+}
+
 function normalizeProductRecord(product) {
+  const stock = normalizeProductStock(product);
+  const primaryColor = stock.find((item) => item.quantity > 0)?.color || stock[0]?.color || product?.color || 'black';
+  const stockTotal = stock.reduce((total, item) => total + item.quantity, 0);
+
   return {
     featured: false,
     saleStatus: 'available',
     specs: [],
     images: [],
+    stock: [],
     ...product,
+    color: primaryColor,
+    saleStatus:
+      stockTotal > 0
+        ? 'available'
+        : product?.saleStatus === 'sold'
+          ? 'sold'
+          : 'out_of_stock',
     specs: Array.isArray(product?.specs) ? product.specs : [],
-    images: normalizeProductImages(product)
+    images: normalizeProductImages(product),
+    stock
   };
 }
 
@@ -584,24 +647,25 @@ function getProductImages(product) {
   return normalizeProductImages(product);
 }
 
-function readProductImageFile(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      resolve({
-        id: `${createId(file.name, 'image')}-${Math.random().toString(36).slice(2, 8)}`,
-        name: file.name,
-        alt: file.name.replace(/\.[^.]+$/, '') || 'Imagem do produto',
-        url: String(reader.result)
-      });
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
+function getProductStock(product) {
+  return normalizeProductStock(product);
 }
 
-function readProductImageFiles(files) {
-  return Promise.all(Array.from(files || []).map(readProductImageFile));
+function getTotalStock(product) {
+  return getProductStock(product).reduce((total, item) => total + item.quantity, 0);
+}
+
+async function readProductImageFiles(files, productName) {
+  const payload = await uploadProductImages(files, { productName });
+
+  return (payload.images || [])
+    .map((image, index) => ({
+      id: image.id || `${createId(image.name || productName, 'image')}-${index + 1}`,
+      name: image.name || '',
+      alt: image.alt || productName || 'Imagem do produto',
+      url: image.url
+    }))
+    .filter((image) => image.url);
 }
 
 function readReceiptFile(file) {
@@ -722,29 +786,194 @@ function colorLabel(value) {
   return COLOR_OPTIONS.find((color) => color.value === value)?.label || value;
 }
 
-function getProductStatus(product, reservations, now) {
-  if (product.saleStatus === 'sold') {
-    return { blocked: true, label: 'Vendido', reservation: null };
+function getReservationKey(productId, color) {
+  return `${productId}__${color || 'default'}`;
+}
+
+function getReservationProductId(key, reservation) {
+  return reservation?.productId || String(key || '').split('__')[0];
+}
+
+function getReservationColor(key, reservation, product) {
+  return reservation?.color || String(key || '').split('__')[1] || product?.color || 'black';
+}
+
+function isReservationActive(reservation, now) {
+  return Boolean(reservation && (reservation.proofAttached || !reservation.expiresAt || reservation.expiresAt > now));
+}
+
+function getReservedQuantity(product, reservations = {}, now = Date.now(), color) {
+  return Object.entries(reservations || {}).reduce((total, [key, reservation]) => {
+    if (!isReservationActive(reservation, now)) return total;
+    if (getReservationProductId(key, reservation) !== product.id) return total;
+
+    const reservationColor = getReservationColor(key, reservation, product);
+    if (color && reservationColor !== color) return total;
+
+    return total + Math.max(1, normalizeQuantity(reservation.quantity || 1));
+  }, 0);
+}
+
+function getStockOptions(product, reservations = {}, now = Date.now()) {
+  return getProductStock(product).map((item) => {
+    const reserved = getReservedQuantity(product, reservations, now, item.color);
+    const availableQuantity = Math.max(0, item.quantity - reserved);
+
+    return {
+      ...item,
+      reserved,
+      availableQuantity
+    };
+  });
+}
+
+function getAvailableQuantity(product, reservations = {}, now = Date.now(), color) {
+  const stockOptions = getStockOptions(product, reservations, now);
+  const matchingOptions = color ? stockOptions.filter((item) => item.color === color) : stockOptions;
+
+  return matchingOptions.reduce((total, item) => total + item.availableQuantity, 0);
+}
+
+function getAvailableStockColor(product, reservations = {}, now = Date.now(), preferredColor) {
+  const stockOptions = getStockOptions(product, reservations, now);
+  const preferred = stockOptions.find((item) => item.color === preferredColor && item.availableQuantity > 0);
+
+  return preferred?.color || stockOptions.find((item) => item.availableQuantity > 0)?.color || '';
+}
+
+function getDisplayColor(product, reservations = {}, now = Date.now(), preferredColor) {
+  return (
+    preferredColor ||
+    product?.selectedColor ||
+    getAvailableStockColor(product, reservations, now, product?.color) ||
+    getProductStock(product)[0]?.color ||
+    product?.color ||
+    'black'
+  );
+}
+
+function stockSummary(product, reservations = {}, now = Date.now()) {
+  const availableQuantity = getAvailableQuantity(product, reservations, now);
+  if (!availableQuantity) return 'Sem estoque';
+  return `${availableQuantity} un. em estoque`;
+}
+
+function formatProductColorName(product, color) {
+  return color ? `${product.name} - ${colorLabel(color)}` : product.name;
+}
+
+function normalizeCartEntries(entries, products = []) {
+  const productMap = new Map(products.map((product) => [product.id, product]));
+
+  return (Array.isArray(entries) ? entries : [])
+    .map((entry) => {
+      if (typeof entry === 'string') {
+        const product = productMap.get(entry);
+        const color = product ? getDisplayColor(product) : 'black';
+        return {
+          id: getReservationKey(entry, color),
+          productId: entry,
+          color
+        };
+      }
+
+      const productId = entry?.productId || entry?.id;
+      if (!productId) return null;
+
+      const product = productMap.get(productId);
+      const color = entry?.color || (product ? getDisplayColor(product) : 'black');
+
+      return {
+        id: entry?.id || getReservationKey(productId, color),
+        productId,
+        color
+      };
+    })
+    .filter(Boolean);
+}
+
+function withSelectedProductColor(product, color, reservations = {}, now = Date.now()) {
+  const selectedColor = getDisplayColor(product, reservations, now, color);
+
+  return {
+    ...product,
+    color: selectedColor,
+    selectedColor
+  };
+}
+
+function getProductStatus(product, reservations, now, color) {
+  const availableQuantity = getAvailableQuantity(product, reservations, now, color);
+  const totalStock = getTotalStock(product);
+
+  if (availableQuantity > 0) {
+    return {
+      blocked: false,
+      label: availableQuantity === 1 ? '1 disponivel' : `${availableQuantity} disponiveis`,
+      reservation: null,
+      availableQuantity
+    };
   }
 
-  if (product.saleStatus === 'out_of_stock') {
-    return { blocked: true, label: 'Esgotado', reservation: null };
-  }
+  const reservation = Object.entries(reservations || {}).find(([key, item]) => {
+    if (!isReservationActive(item, now)) return false;
+    if (getReservationProductId(key, item) !== product.id) return false;
+    return color ? getReservationColor(key, item, product) === color : true;
+  })?.[1] || null;
 
-  const reservation = reservations?.[product.id];
-  const active =
-    reservation &&
-    (reservation.proofAttached || !reservation.expiresAt || reservation.expiresAt > now);
-
-  if (!active) {
-    return { blocked: false, label: 'Disponível', reservation: null };
+  if (reservation) {
+    return {
+      blocked: true,
+      label: 'Reservado',
+      reservation,
+      availableQuantity: 0
+    };
   }
 
   return {
     blocked: true,
-    label: product.condition === 'Novo' ? 'Esgotado' : 'Vendido',
-    reservation
+    label: totalStock > 0 || product.condition === 'Novo' ? 'Esgotado' : 'Vendido',
+    reservation: null,
+    availableQuantity: 0
   };
+}
+
+function decreaseProductStock(product, color, quantity = 1) {
+  let remaining = Math.max(1, normalizeQuantity(quantity || 1));
+  const stock = getProductStock(product);
+  const nextStock = stock.map((item) => {
+    if (remaining <= 0) return item;
+    if (color && item.color !== color) return item;
+
+    const decreaseBy = Math.min(item.quantity, remaining);
+    remaining -= decreaseBy;
+    return { ...item, quantity: item.quantity - decreaseBy };
+  });
+
+  if (remaining > 0 && !color) {
+    nextStock.forEach((item, index) => {
+      if (remaining <= 0) return;
+      const decreaseBy = Math.min(item.quantity, remaining);
+      remaining -= decreaseBy;
+      nextStock[index] = { ...item, quantity: item.quantity - decreaseBy };
+    });
+  }
+
+  const primaryColor = nextStock.find((item) => item.quantity > 0)?.color || nextStock[0]?.color || product.color;
+  const totalStock = nextStock.reduce((total, item) => total + item.quantity, 0);
+
+  return {
+    ...product,
+    color: primaryColor,
+    stock: nextStock,
+    saleStatus: totalStock > 0 ? 'available' : product.condition === 'Novo' ? 'out_of_stock' : 'sold'
+  };
+}
+
+function decreaseStockForOrder(product, orderItems) {
+  return orderItems
+    .filter((item) => item.productId === product.id)
+    .reduce((currentProduct, item) => decreaseProductStock(currentProduct, item.color, item.quantity || 1), product);
 }
 
 function applyFilters(items, filters, reservations = {}, now = Date.now()) {
@@ -759,7 +988,9 @@ function applyFilters(items, filters, reservations = {}, now = Date.now()) {
   }
 
   if (filters.colors.length) {
-    filtered = filtered.filter((product) => filters.colors.includes(product.color));
+    filtered = filtered.filter((product) =>
+      getProductStock(product).some((item) => filters.colors.includes(item.color))
+    );
   }
 
   if (filters.sort === 'price-asc') {
@@ -801,13 +1032,25 @@ export default function App() {
     [db.favorites, favoriteOwnerId]
   );
   const cartOwnerId = currentUser?.id || '';
-  const cartIds = useMemo(
+  const rawCartEntries = useMemo(
     () => (cartOwnerId ? db.carts?.[cartOwnerId] || [] : []),
     [cartOwnerId, db.carts]
   );
+  const cartItems = useMemo(
+    () => normalizeCartEntries(rawCartEntries, db.products),
+    [rawCartEntries, db.products]
+  );
   const cartProducts = useMemo(
-    () => cartIds.map((productId) => db.products.find((product) => product.id === productId)).filter(Boolean),
-    [cartIds, db.products]
+    () =>
+      cartItems
+        .map((item) => {
+          const product = db.products.find((entry) => entry.id === item.productId);
+          return product
+            ? { ...withSelectedProductColor(product, item.color, db.reservations, now), cartItemId: item.id }
+            : null;
+        })
+        .filter(Boolean),
+    [cartItems, db.products, db.reservations, now]
   );
 
   useEffect(() => {
@@ -1140,11 +1383,27 @@ export default function App() {
     setNotice('Admin desconectado.');
   }
 
-  function upsertReservation(product, mode) {
+  function upsertReservation(product, mode, color) {
     if (!requireUserAccount(mode === 'reserve' ? 'Reservar' : 'Comprar')) return;
 
+    const selectedColor = getAvailableStockColor(
+      product,
+      db.reservations,
+      now,
+      color || product.selectedColor || product.color
+    );
+
+    if (!selectedColor) {
+      setNotice('Esse produto nao tem unidades disponiveis nessa cor.');
+      return;
+    }
+
     const percent = mode === 'reserve' ? 50 : 100;
+    const reservationKey = getReservationKey(product.id, selectedColor);
     const reservation = {
+      productId: product.id,
+      color: selectedColor,
+      quantity: 1,
       mode,
       percent,
       amount: product.price * (percent / 100),
@@ -1157,9 +1416,9 @@ export default function App() {
 
     updateDb((current) => ({
       ...current,
-      reservations: { ...current.reservations, [product.id]: reservation }
+      reservations: { ...current.reservations, [reservationKey]: reservation }
     }));
-    setCheckout(product.id);
+    setCheckout(reservationKey);
   }
 
   async function attachReceipt(file) {
@@ -1171,9 +1430,10 @@ export default function App() {
       return;
     }
 
-    const product = db.products.find((item) => item.id === checkout);
     const reservation = db.reservations[checkout];
+    const product = db.products.find((item) => item.id === (reservation?.productId || checkout));
     if (!product || !reservation) return;
+    const selectedColor = getReservationColor(checkout, reservation, product);
 
     let receiptFile;
     try {
@@ -1187,7 +1447,20 @@ export default function App() {
     const order = {
       id: orderId,
       productId: product.id,
-      productName: product.name,
+      productColor: selectedColor,
+      productName: formatProductColorName(product, selectedColor),
+      reservationKeys: [checkout],
+      items: [
+        {
+          productId: product.id,
+          productName: product.name,
+          color: selectedColor,
+          colorLabel: colorLabel(selectedColor),
+          amount: reservation.amount,
+          condition: product.condition,
+          quantity: 1
+        }
+      ],
       customerId: currentUser.id,
       customerName: currentUser.name,
       customerEmail: currentUser.email,
@@ -1212,8 +1485,8 @@ export default function App() {
         orders,
         reservations: {
           ...current.reservations,
-          [product.id]: {
-            ...current.reservations[product.id],
+          [checkout]: {
+            ...current.reservations[checkout],
             proofAttached: true,
             receiptName: receiptFile.name,
             receiptType: receiptFile.type,
@@ -1228,40 +1501,62 @@ export default function App() {
     setNotice('Comprovante enviado para validação no painel admin.');
   }
 
-  function addToCart(product) {
+  function addToCart(product, color) {
     if (!requireUserAccount('Adicionar ao carrinho')) return;
 
-    const status = getProductStatus(product, db.reservations, now);
+    const selectedColor = getAvailableStockColor(
+      product,
+      db.reservations,
+      now,
+      color || product.selectedColor || product.color
+    );
+
+    if (!selectedColor) {
+      setNotice('Esse produto nao esta disponivel para adicionar ao carrinho.');
+      return;
+    }
+
+    const status = getProductStatus(product, db.reservations, now, selectedColor);
     if (status.blocked) {
       setNotice('Esse produto nao esta disponivel para adicionar ao carrinho.');
       return;
     }
 
-    if (cartIds.includes(product.id)) {
-      setNotice('Esse produto ja esta no carrinho.');
+    const cartItemId = getReservationKey(product.id, selectedColor);
+
+    if (cartItems.some((item) => item.id === cartItemId)) {
+      setNotice('Esse produto nessa cor ja esta no carrinho.');
       navigate('/carrinho');
       return;
     }
+
+    const cartEntry = {
+      id: cartItemId,
+      productId: product.id,
+      color: selectedColor
+    };
 
     updateDb((current) => ({
       ...current,
       carts: {
         ...(current.carts || {}),
-        [cartOwnerId]: [...(current.carts?.[cartOwnerId] || []), product.id]
+        [cartOwnerId]: [...normalizeCartEntries(current.carts?.[cartOwnerId] || [], current.products), cartEntry]
       }
     }));
 
-    setNotice(`${product.name} adicionado ao carrinho.`);
+    setNotice(`${formatProductColorName(product, selectedColor)} adicionado ao carrinho.`);
   }
 
-  function removeFromCart(productId) {
+  function removeFromCart(cartItemId) {
     if (!cartOwnerId) return;
 
     updateDb((current) => ({
       ...current,
       carts: {
         ...(current.carts || {}),
-        [cartOwnerId]: (current.carts?.[cartOwnerId] || []).filter((id) => id !== productId)
+        [cartOwnerId]: normalizeCartEntries(current.carts?.[cartOwnerId] || [], current.products).filter(
+          (item) => item.id !== cartItemId
+        )
       }
     }));
     setNotice('Produto removido do carrinho.');
@@ -1284,7 +1579,7 @@ export default function App() {
     if (!requireUserAccount('Comprar pelo carrinho')) return;
 
     const availableProducts = cartProducts.filter(
-      (product) => !getProductStatus(product, db.reservations, now).blocked
+      (product) => !getProductStatus(product, db.reservations, now, product.selectedColor).blocked
     );
 
     if (!availableProducts.length) {
@@ -1298,7 +1593,11 @@ export default function App() {
     updateDb((current) => {
       const reservations = { ...(current.reservations || {}) };
       availableProducts.forEach((product) => {
-        reservations[product.id] = {
+        const reservationKey = getReservationKey(product.id, product.selectedColor);
+        reservations[reservationKey] = {
+          productId: product.id,
+          color: product.selectedColor,
+          quantity: 1,
           mode: 'cart',
           cartId,
           percent: 100,
@@ -1314,7 +1613,11 @@ export default function App() {
       return { ...current, reservations };
     });
 
-    setCartCheckout({ id: cartId, productIds: availableProducts.map((product) => product.id) });
+    setCartCheckout({
+      id: cartId,
+      items: availableProducts.map((product) => ({ productId: product.id, color: product.selectedColor })),
+      productIds: availableProducts.map((product) => product.id)
+    });
   }
 
   async function attachCartReceipt(file) {
@@ -1326,14 +1629,21 @@ export default function App() {
       return;
     }
 
-    const productsInCheckout = cartCheckout.productIds
-      .map((productId) => db.products.find((product) => product.id === productId))
+    const checkoutItems = Array.isArray(cartCheckout.items) && cartCheckout.items.length
+      ? cartCheckout.items
+      : (cartCheckout.productIds || []).map((productId) => ({ productId }));
+    const productsInCheckout = checkoutItems
+      .map((item) => {
+        const product = db.products.find((entry) => entry.id === item.productId);
+        return product ? withSelectedProductColor(product, item.color, db.reservations, now) : null;
+      })
       .filter(Boolean);
 
     if (!productsInCheckout.length) return;
 
-    const checkoutReservations = productsInCheckout
-      .map((product) => db.reservations?.[product.id])
+    const reservationKeys = productsInCheckout.map((product) => getReservationKey(product.id, product.selectedColor));
+    const checkoutReservations = reservationKeys
+      .map((key) => db.reservations?.[key])
       .filter((reservation) => reservation?.cartId === cartCheckout.id);
 
     if (checkoutReservations.length !== productsInCheckout.length) {
@@ -1357,16 +1667,20 @@ export default function App() {
     const items = productsInCheckout.map((product) => ({
       productId: product.id,
       productName: product.name,
+      color: product.selectedColor,
+      colorLabel: colorLabel(product.selectedColor),
       amount: product.price,
-      condition: product.condition
+      condition: product.condition,
+      quantity: 1
     }));
     const order = {
       id: orderId,
       productId: productsInCheckout[0]?.id || '',
       productIds: productsInCheckout.map((product) => product.id),
+      reservationKeys,
       productName:
         productsInCheckout.length === 1
-          ? productsInCheckout[0].name
+          ? formatProductColorName(productsInCheckout[0], productsInCheckout[0].selectedColor)
           : `Carrinho (${productsInCheckout.length} produtos)`,
       items,
       customerId: currentUser.id,
@@ -1390,8 +1704,9 @@ export default function App() {
       const reservations = { ...(current.reservations || {}) };
 
       productsInCheckout.forEach((product) => {
-        reservations[product.id] = {
-          ...reservations[product.id],
+        const reservationKey = getReservationKey(product.id, product.selectedColor);
+        reservations[reservationKey] = {
+          ...reservations[reservationKey],
           proofAttached: true,
           receiptName: receiptFile.name,
           receiptType: receiptFile.type,
@@ -1401,8 +1716,8 @@ export default function App() {
         };
       });
 
-      const currentCart = current.carts?.[cartOwnerId] || [];
-      const purchasedIds = new Set(productsInCheckout.map((product) => product.id));
+      const currentCart = normalizeCartEntries(current.carts?.[cartOwnerId] || [], current.products);
+      const purchasedIds = new Set(productsInCheckout.map((product) => getReservationKey(product.id, product.selectedColor)));
 
       return {
         ...current,
@@ -1410,7 +1725,7 @@ export default function App() {
         reservations,
         carts: {
           ...(current.carts || {}),
-          [cartOwnerId]: currentCart.filter((productId) => !purchasedIds.has(productId))
+          [cartOwnerId]: currentCart.filter((item) => !purchasedIds.has(item.id))
         }
       };
     });
@@ -1640,7 +1955,11 @@ export default function App() {
       <Footer settings={db.settings} categories={navCategories} navigate={navigate} />
       {checkout ? (
         <CheckoutModal
-          product={db.products.find((product) => product.id === checkout)}
+          product={(() => {
+            const reservation = db.reservations[checkout];
+            const product = db.products.find((item) => item.id === (reservation?.productId || checkout));
+            return product ? withSelectedProductColor(product, getReservationColor(checkout, reservation, product)) : null;
+          })()}
           reservation={db.reservations[checkout]}
           settings={db.settings}
           now={now}
@@ -1651,8 +1970,11 @@ export default function App() {
       ) : null}
       {cartCheckout ? (
         <CartCheckoutModal
-          products={cartCheckout.productIds
-            .map((productId) => db.products.find((product) => product.id === productId))
+          products={(cartCheckout.items || (cartCheckout.productIds || []).map((productId) => ({ productId })))
+            .map((item) => {
+              const product = db.products.find((entry) => entry.id === item.productId);
+              return product ? withSelectedProductColor(product, item.color, db.reservations, now) : null;
+            })
             .filter(Boolean)}
           reservations={db.reservations}
           settings={db.settings}
@@ -1898,7 +2220,7 @@ function CollectionPage({
 
 function ProductFilters({ products, filters, setFilters, reservations, now }) {
   const availableColors = COLOR_OPTIONS.filter((color) =>
-    products.some((product) => product.color === color.value)
+    products.some((product) => getProductStock(product).some((item) => item.color === color.value))
   );
   const unavailableCount = products.filter((product) => getProductStatus(product, reservations, now).blocked).length;
 
@@ -1998,11 +2320,20 @@ function ProductPage({
   favoriteIds,
   onToggleFavorite
 }) {
-  const status = getProductStatus(product, reservations, now);
+  const stockOptions = getStockOptions(product, reservations, now);
+  const firstAvailableColor = getAvailableStockColor(product, reservations, now, product.color);
+  const [selectedColor, setSelectedColor] = useState(firstAvailableColor || product.color);
+  const activeColor = selectedColor || firstAvailableColor || product.color;
+  const displayProduct = withSelectedProductColor(product, activeColor, reservations, now);
+  const status = getProductStatus(product, reservations, now, activeColor);
   const category = categories.find((item) => item.slug === product.category);
   const similar = products.filter((item) => item.category === product.category && item.id !== product.id);
   const otherProducts = products.filter((item) => item.category !== product.category && item.id !== product.id);
   const carouselProducts = otherProducts.length > 1 ? [...otherProducts, ...otherProducts] : otherProducts;
+
+  useEffect(() => {
+    setSelectedColor(firstAvailableColor || getProductStock(product)[0]?.color || product.color);
+  }, [product.id, firstAvailableColor, product.color]);
 
   return (
     <>
@@ -2017,7 +2348,7 @@ function ProductPage({
         />
 
         <div className="detail-layout">
-          <ProductGallery product={product} />
+          <ProductGallery product={displayProduct} />
 
           <div className="detail-copy">
             <div className="detail-status-row">
@@ -2038,12 +2369,32 @@ function ProductPage({
               <span>{product.installments}</span>
             </div>
 
+            <div className="color-selector">
+              <strong>Cores em estoque</strong>
+              <div className="swatch-row">
+                {stockOptions.map((option) => (
+                  <button
+                    className={`swatch-option ${activeColor === option.color ? 'active' : ''}`}
+                    type="button"
+                    key={option.id}
+                    disabled={!option.availableQuantity}
+                    onClick={() => setSelectedColor(option.color)}
+                    title={`${colorLabel(option.color)} - ${option.availableQuantity} unidade(s)`}
+                  >
+                    <span className={`swatch ${option.color}`} />
+                    {colorLabel(option.color)}
+                    <small>{option.availableQuantity} un.</small>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="detail-actions">
               <button
                 className="product-button dark"
                 type="button"
                 disabled={status.blocked}
-                onClick={() => onCheckout(product, 'buy')}
+                onClick={() => onCheckout(product, 'buy', activeColor)}
               >
                 Comprar
               </button>
@@ -2051,7 +2402,7 @@ function ProductPage({
                 className="product-button secondary"
                 type="button"
                 disabled={status.blocked}
-                onClick={() => onCheckout(product, 'reserve')}
+                onClick={() => onCheckout(product, 'reserve', activeColor)}
               >
                 Reservar com 50%
               </button>
@@ -2059,7 +2410,7 @@ function ProductPage({
                 className="product-button cart-detail-button"
                 type="button"
                 disabled={status.blocked}
-                onClick={() => onAddToCart(product)}
+                onClick={() => onAddToCart(product, activeColor)}
                 aria-label={`Adicionar ${product.name} ao carrinho`}
                 title="Adicionar ao carrinho"
               >
@@ -2083,8 +2434,12 @@ function ProductPage({
                 <dd>{product.condition}</dd>
               </div>
               <div className="spec-item">
-                <dt>Cor padrão</dt>
-                <dd>{colorLabel(product.color)}</dd>
+                <dt>Cor selecionada</dt>
+                <dd>{colorLabel(activeColor)}</dd>
+              </div>
+              <div className="spec-item">
+                <dt>Estoque</dt>
+                <dd>{stockSummary(product, reservations, now)}</dd>
               </div>
             </dl>
           </div>
@@ -2146,6 +2501,8 @@ function ProductPage({
 
 function HomeProductCard({ product, reservations, now, navigate, onCheckout, onAddToCart, isFavorite, onToggleFavorite }) {
   const status = getProductStatus(product, reservations, now);
+  const selectedColor = getAvailableStockColor(product, reservations, now, product.color);
+  const displayProduct = withSelectedProductColor(product, selectedColor, reservations, now);
 
   return (
     <article className={`product-card ${status.blocked ? 'is-blocked' : ''}`}>
@@ -2156,21 +2513,22 @@ function HomeProductCard({ product, reservations, now, navigate, onCheckout, onA
         onClick={() => onToggleFavorite(product.id)}
       />
       <AppLink className="product-link" to={`/produto/${product.id}`} navigate={navigate}>
-        <ProductVisual product={product} />
+        <ProductVisual product={displayProduct} />
         <span className="product-badge">{product.tag}</span>
         <h3>{product.name}</h3>
         <p>{product.description}</p>
+        <StockSwatches product={product} reservations={reservations} now={now} />
         <strong className="price">{currency.format(product.price)}</strong>
       </AppLink>
       <div className="card-actions">
-        <button type="button" disabled={status.blocked} onClick={() => onCheckout(product, 'buy')}>
+        <button type="button" disabled={status.blocked} onClick={() => onCheckout(product, 'buy', selectedColor)}>
           Comprar agora
         </button>
         <button
           className="cart-icon-button"
           type="button"
           disabled={status.blocked}
-          onClick={() => onAddToCart(product)}
+          onClick={() => onAddToCart(product, selectedColor)}
           aria-label={`Adicionar ${product.name} ao carrinho`}
           title="Adicionar ao carrinho"
         >
@@ -2183,6 +2541,8 @@ function HomeProductCard({ product, reservations, now, navigate, onCheckout, onA
 
 function ProductCard({ product, reservations, now, navigate, onCheckout, onAddToCart, isFavorite, onToggleFavorite }) {
   const status = getProductStatus(product, reservations, now);
+  const selectedColor = getAvailableStockColor(product, reservations, now, product.color);
+  const displayProduct = withSelectedProductColor(product, selectedColor, reservations, now);
 
   return (
     <article className={`product-card ${status.blocked ? 'is-blocked' : ''}`}>
@@ -2193,26 +2553,27 @@ function ProductCard({ product, reservations, now, navigate, onCheckout, onAddTo
         onClick={() => onToggleFavorite(product.id)}
       />
       <AppLink className="product-link" to={`/produto/${product.id}`} navigate={navigate}>
-        <ProductVisual product={product} />
+        <ProductVisual product={displayProduct} />
         <span className="product-badge">{product.tag}</span>
         <h3>{product.name}</h3>
         <p>{product.description}</p>
         <div className="product-meta">
           <span>{product.condition}</span>
-          <span>{colorLabel(product.color)}</span>
+          <span>{stockSummary(product, reservations, now)}</span>
         </div>
+        <StockSwatches product={product} reservations={reservations} now={now} />
         <strong className="price">{currency.format(product.price)}</strong>
         <span className="installments">{product.installments}</span>
       </AppLink>
       <div className="card-actions">
-        <button type="button" disabled={status.blocked} onClick={() => onCheckout(product, 'buy')}>
+        <button type="button" disabled={status.blocked} onClick={() => onCheckout(product, 'buy', selectedColor)}>
           Comprar
         </button>
         <button
           className="secondary-action"
           type="button"
           disabled={status.blocked}
-          onClick={() => onCheckout(product, 'reserve')}
+          onClick={() => onCheckout(product, 'reserve', selectedColor)}
         >
           Reservar
         </button>
@@ -2220,7 +2581,7 @@ function ProductCard({ product, reservations, now, navigate, onCheckout, onAddTo
           className="cart-icon-button"
           type="button"
           disabled={status.blocked}
-          onClick={() => onAddToCart(product)}
+          onClick={() => onAddToCart(product, selectedColor)}
           aria-label={`Adicionar ${product.name} ao carrinho`}
           title="Adicionar ao carrinho"
         >
@@ -2228,6 +2589,25 @@ function ProductCard({ product, reservations, now, navigate, onCheckout, onAddTo
         </button>
       </div>
     </article>
+  );
+}
+
+function StockSwatches({ product, reservations, now }) {
+  const options = getStockOptions(product, reservations, now);
+
+  return (
+    <div className="stock-swatch-row" aria-label="Cores em estoque">
+      {options.map((option) => (
+        <span
+          className={`stock-swatch ${option.availableQuantity ? '' : 'is-empty'}`}
+          key={option.id}
+          title={`${colorLabel(option.color)} - ${option.availableQuantity} unidade(s)`}
+        >
+          <span className={`swatch ${option.color}`} />
+          <span>{option.availableQuantity}</span>
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -2339,7 +2719,7 @@ function AuthRequiredPage({ navigate }) {
 function CartPage({ products, reservations, now, navigate, onRemove, onClear, onCheckout }) {
   const rows = products.map((product) => ({
     product,
-    status: getProductStatus(product, reservations, now)
+    status: getProductStatus(product, reservations, now, product.selectedColor)
   }));
   const availableRows = rows.filter((row) => !row.status.blocked);
   const total = availableRows.reduce((sum, row) => sum + row.product.price, 0);
@@ -2378,12 +2758,12 @@ function CartPage({ products, reservations, now, navigate, onRemove, onClear, on
                   </div>
                   <div className="cart-item-meta">
                     <span>{product.condition}</span>
-                    <span>{colorLabel(product.color)}</span>
+                    <span>{colorLabel(product.selectedColor || product.color)}</span>
                   </div>
                 </div>
                 <div className="cart-item-actions">
                   <strong>{currency.format(product.price)}</strong>
-                  <button type="button" onClick={() => onRemove(product.id)}>
+                  <button type="button" onClick={() => onRemove(product.cartItemId)}>
                     <Trash2 size={16} aria-hidden="true" />
                     Remover
                   </button>
@@ -3109,9 +3489,9 @@ function DashboardManager({ db }) {
   const productRanking = buildProductRanking(sales);
   const categoryRanking = buildCategoryRanking(sales, db.products, db.categories);
   const inventory = {
-    available: db.products.filter((product) => product.saleStatus === 'available').length,
-    sold: db.products.filter((product) => product.saleStatus === 'sold').length,
-    out: db.products.filter((product) => product.saleStatus === 'out_of_stock').length
+    available: db.products.reduce((total, product) => total + getTotalStock(product), 0),
+    sold: soldUnits,
+    out: db.products.filter((product) => getTotalStock(product) === 0).length
   };
   const recentSales = [...sales]
     .sort((a, b) => getOrderTime(b) - getOrderTime(a))
@@ -3372,7 +3752,9 @@ function getOrderItems(order) {
     return order.productIds.map((productId, index) => ({
       productId,
       productName: index === 0 ? order.productName : `Produto ${index + 1}`,
-      amount: splitAmount
+      color: Array.isArray(order.productColors) ? order.productColors[index] : undefined,
+      amount: splitAmount,
+      quantity: 1
     }));
   }
 
@@ -3380,7 +3762,9 @@ function getOrderItems(order) {
     {
       productId: order.productId || order.id,
       productName: order.productName || 'Produto',
-      amount: Number(order.amount || 0)
+      color: order.productColor,
+      amount: Number(order.amount || 0),
+      quantity: 1
     }
   ];
 }
@@ -3497,13 +3881,19 @@ function ProductManager({ db, updateDb, setNotice }) {
     visual: 'phone',
     featured: false,
     saleStatus: 'available',
+    stock: [{ id: getStockRowId('new-product', 'black', 0), color: 'black', quantity: 1 }],
     images: []
   };
   const [form, setForm] = useState(empty);
   const editing = Boolean(form.id);
 
   function edit(product) {
-    setForm({ ...product, images: getProductImages(product), specsText: product.specs.join('\n') });
+    setForm({
+      ...product,
+      stock: getProductStock(product),
+      images: getProductImages(product),
+      specsText: product.specs.join('\n')
+    });
   }
 
   function reset() {
@@ -3514,8 +3904,14 @@ function ProductManager({ db, updateDb, setNotice }) {
     const files = event.target.files;
     if (!files?.length) return;
 
+    if (!form.name.trim()) {
+      setNotice('Informe o nome do produto antes de anexar as imagens.');
+      event.target.value = '';
+      return;
+    }
+
     try {
-      const images = await readProductImageFiles(files);
+      const images = await readProductImageFiles(files, form.name);
       setForm((current) => ({ ...current, images: [...(current.images || []), ...images] }));
       setNotice(`${images.length} imagem(ns) anexada(s) ao produto.`);
     } catch {
@@ -3532,13 +3928,55 @@ function ProductManager({ db, updateDb, setNotice }) {
     }));
   }
 
+  function updateStockRow(rowId, updates) {
+    setForm((current) => ({
+      ...current,
+      stock: (current.stock || []).map((row) => (row.id === rowId ? { ...row, ...updates } : row))
+    }));
+  }
+
+  function addStockRow() {
+    const usedColors = new Set((form.stock || []).map((row) => row.color));
+    const nextColor = COLOR_OPTIONS.find((color) => !usedColors.has(color.value))?.value || 'black';
+
+    setForm((current) => ({
+      ...current,
+      stock: [
+        ...(current.stock || []),
+        {
+          id: `${getStockRowId(current.id || 'new-product', nextColor, (current.stock || []).length)}-${Math.random()
+            .toString(36)
+            .slice(2, 7)}`,
+          color: nextColor,
+          quantity: 1
+        }
+      ]
+    }));
+  }
+
+  function removeStockRow(rowId) {
+    setForm((current) => {
+      const stock = (current.stock || []).filter((row) => row.id !== rowId);
+      return {
+        ...current,
+        stock: stock.length ? stock : [{ id: getStockRowId(current.id || 'new-product', 'black', 0), color: 'black', quantity: 0 }]
+      };
+    });
+  }
+
   function submit(event) {
     event.preventDefault();
+    const stock = normalizeProductStock(form);
+    const stockTotal = stock.reduce((total, item) => total + item.quantity, 0);
+    const primaryColor = stock.find((item) => item.quantity > 0)?.color || stock[0]?.color || form.color;
     const product = {
       ...form,
       id: form.id || createId(form.name, 'product'),
+      color: primaryColor,
       price: Number(form.price || 0),
       images: getProductImages(form),
+      stock,
+      saleStatus: stockTotal > 0 ? 'available' : form.condition === 'Novo' ? 'out_of_stock' : 'sold',
       specs: form.specsText
         .split('\n')
         .map((item) => item.trim())
@@ -3623,7 +4061,7 @@ function ProductManager({ db, updateDb, setNotice }) {
             />
           </label>
           <label>
-            Cor padrão
+            Cor visual padrão
             <select value={form.color} onChange={(event) => setForm({ ...form, color: event.target.value })}>
               {COLOR_OPTIONS.map((color) => (
                 <option value={color.value} key={color.value}>
@@ -3643,13 +4081,50 @@ function ProductManager({ db, updateDb, setNotice }) {
             </select>
           </label>
           <label>
-            Status
-            <select value={form.saleStatus} onChange={(event) => setForm({ ...form, saleStatus: event.target.value })}>
+            Status calculado
+            <select value={getTotalStock(form) > 0 ? 'available' : form.condition === 'Novo' ? 'out_of_stock' : 'sold'} disabled>
               <option value="available">Disponível</option>
               <option value="sold">Vendido</option>
               <option value="out_of_stock">Esgotado</option>
             </select>
           </label>
+          <div className="stock-editor wide-field">
+            <div className="stock-editor-heading">
+              <strong>Estoque por cor</strong>
+              <small>{getTotalStock(form)} unidade(s) disponivel(is) no cadastro.</small>
+            </div>
+            {(form.stock || []).map((row) => (
+              <div className="stock-row" key={row.id}>
+                <label>
+                  Cor
+                  <select value={row.color} onChange={(event) => updateStockRow(row.id, { color: event.target.value })}>
+                    {COLOR_OPTIONS.map((color) => (
+                      <option value={color.value} key={color.value}>
+                        {color.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Unidades
+                  <input
+                    min="0"
+                    step="1"
+                    type="number"
+                    value={row.quantity}
+                    onChange={(event) => updateStockRow(row.id, { quantity: event.target.value })}
+                  />
+                </label>
+                <button type="button" onClick={() => removeStockRow(row.id)} aria-label="Remover cor do estoque">
+                  <Trash2 size={15} aria-hidden="true" />
+                </button>
+              </div>
+            ))}
+            <button className="button secondary stock-add-button" type="button" onClick={addStockRow}>
+              <Plus size={15} aria-hidden="true" />
+              Adicionar cor
+            </button>
+          </div>
           <label className="check-inline">
             <input
               type="checkbox"
@@ -3711,7 +4186,14 @@ function ProductManager({ db, updateDb, setNotice }) {
             <div className="admin-list-row" key={product.id}>
               <span>
                 <strong>{product.name}</strong>
-                <small>{categoryLabel(db.categories, product.category)} · {currency.format(product.price)}</small>
+                <small>
+                  {categoryLabel(db.categories, product.category)} · {currency.format(product.price)} ·{' '}
+                  {getTotalStock(product)} un. ·{' '}
+                  {getProductStock(product)
+                    .filter((item) => item.quantity > 0)
+                    .map((item) => `${colorLabel(item.color)} (${item.quantity})`)
+                    .join(', ') || 'sem estoque'}
+                </small>
               </span>
               <button type="button" onClick={() => edit(product)}>
                 Editar
@@ -3849,11 +4331,16 @@ function ReceiptManager({ db, updateDb, setNotice }) {
 
   function validate(order) {
     updateDb((current) => {
-      const orderProductIds = Array.isArray(order.productIds) && order.productIds.length
-        ? order.productIds
-        : [order.productId].filter(Boolean);
+      const orderItems = getOrderItems(order);
+      const orderProductIds = orderItems.map((item) => item.productId).filter(Boolean);
       const orderProductSet = new Set(orderProductIds);
+      const reservationKeys = Array.isArray(order.reservationKeys) && order.reservationKeys.length
+        ? order.reservationKeys
+        : orderItems.map((item) => getReservationKey(item.productId, item.color)).filter(Boolean);
       const reservations = { ...current.reservations };
+      reservationKeys.forEach((reservationKey) => {
+        delete reservations[reservationKey];
+      });
       orderProductIds.forEach((productId) => {
         delete reservations[productId];
       });
@@ -3868,7 +4355,7 @@ function ReceiptManager({ db, updateDb, setNotice }) {
         ),
         products: current.products.map((item) => {
           if (!orderProductSet.has(item.id)) return item;
-          return { ...item, saleStatus: item.condition === 'Novo' ? 'out_of_stock' : 'sold' };
+          return decreaseStockForOrder(item, orderItems);
         })
       };
     });
@@ -3923,6 +4410,9 @@ function ReceiptPreviewModal({ order, onClose, onValidate }) {
   const canPreview = Boolean(order.receiptDataUrl);
   const isImage = receiptType.startsWith('image/');
   const isPdf = receiptType === 'application/pdf' || order.receiptName?.toLowerCase().endsWith('.pdf');
+  const itemList = getOrderItems(order)
+    .map((item) => (item.color ? `${item.productName} - ${colorLabel(item.color)}` : item.productName))
+    .join(', ');
 
   return (
     <div className="modal" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -3942,6 +4432,7 @@ function ReceiptPreviewModal({ order, onClose, onValidate }) {
             <InfoLine label="Cliente" value={order.customerName || 'Nao informado'} />
             <InfoLine label="CPF" value={order.customerCpf ? formatCpf(order.customerCpf) : 'Nao informado'} />
             <InfoLine label="E-mail" value={order.customerEmail || 'Nao informado'} />
+            <InfoLine label="Itens" value={itemList || order.productName} />
             <InfoLine label="Valor" value={currency.format(order.amount)} />
             <InfoLine label="Arquivo" value={order.receiptName || 'Sem nome'} />
           </div>
@@ -4074,6 +4565,7 @@ function CheckoutModal({ product, reservation, settings, now, onClose, onReceipt
   const remaining = reservation.expiresAt ? reservation.expiresAt - now : 0;
   const amountLabel = reservation.percent === 50 ? '50% do valor' : '100% do valor';
   const stockLabel = product.condition === 'Novo' ? 'Esgotado' : 'Vendido';
+  const selectedColor = reservation.color || product.selectedColor || product.color;
 
   function sendReceipt() {
     if (!selectedReceipt) return;
@@ -4105,6 +4597,7 @@ function CheckoutModal({ product, reservation, settings, now, onClose, onReceipt
 
           <div className="pix-box">
             <InfoLine label="Produto" value={product.name} />
+            <InfoLine label="Cor" value={colorLabel(selectedColor)} />
             <InfoLine label="Produto ficará como" value={stockLabel} />
             <InfoLine label="Pagamento solicitado" value={amountLabel} />
             <InfoLine label="Valor Pix" value={currency.format(reservation.amount)} />
@@ -4160,18 +4653,20 @@ function CartCheckoutModal({ products, reservations, settings, now, onClose, onR
 
   useEffect(() => {
     setSelectedReceipt(null);
-  }, [products.map((product) => product.id).join('|')]);
+  }, [products.map((product) => `${product.id}:${product.selectedColor || product.color}`).join('|')]);
 
   if (!products.length) return null;
 
-  const activeReservations = products.map((product) => reservations?.[product.id]).filter(Boolean);
+  const activeReservations = products
+    .map((product) => reservations?.[getReservationKey(product.id, product.selectedColor)])
+    .filter(Boolean);
   const total = activeReservations.reduce((sum, reservation) => sum + (reservation.amount || 0), 0);
   const expiresAt = activeReservations
     .map((reservation) => reservation.expiresAt)
     .filter(Boolean)
     .sort((a, b) => a - b)[0];
   const remaining = expiresAt ? expiresAt - now : 0;
-  const productList = products.map((product) => product.name).join(', ');
+  const productList = products.map((product) => formatProductColorName(product, product.selectedColor)).join(', ');
 
   function sendReceipt() {
     if (!selectedReceipt) return;
