@@ -18,7 +18,16 @@ async function request(path, options = {}) {
   });
 
   if (!response.ok) {
-    throw new Error(`Erro ${response.status} ao acessar ${path}`);
+    let message = `Erro ${response.status} ao acessar ${path}`;
+
+    try {
+      const payload = await response.json();
+      message = payload.message || message;
+    } catch {
+      // Keep the HTTP status error when the backend did not send JSON.
+    }
+
+    throw new Error(message);
   }
 
   return response.json();
@@ -31,6 +40,38 @@ export function getHome() {
 export function createLead(payload) {
   return request('/api/leads', {
     method: 'POST',
+    body: JSON.stringify(payload)
+  });
+}
+
+export function getUsers() {
+  return request('/api/users');
+}
+
+export function createUserAccount(payload) {
+  return request('/api/users/register', {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  });
+}
+
+export function loginUserAccount(email, password) {
+  return request('/api/users/login', {
+    method: 'POST',
+    body: JSON.stringify({ email, password })
+  });
+}
+
+export function updateUserAccount(id, payload) {
+  return request(`/api/users/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload)
+  });
+}
+
+export function changeUserAccountPassword(id, payload) {
+  return request(`/api/users/${encodeURIComponent(id)}/password`, {
+    method: 'PUT',
     body: JSON.stringify(payload)
   });
 }

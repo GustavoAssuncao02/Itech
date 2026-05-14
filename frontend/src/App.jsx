@@ -24,7 +24,6 @@ import {
   Plus,
   Save,
   ShoppingBag,
-  ShoppingCart,
   Smartphone,
   Speaker,
   Tablet,
@@ -36,7 +35,14 @@ import {
   Watch,
   X
 } from 'lucide-react';
-import { uploadProductImages } from './api.js';
+import {
+  changeUserAccountPassword,
+  createUserAccount,
+  getUsers,
+  loginUserAccount,
+  updateUserAccount,
+  uploadProductImages
+} from './api.js';
 import itechLogo from './assets/logo.jpg';
 
 const DB_KEY = 'itech_store_db_v3';
@@ -441,7 +447,6 @@ function createDefaultDb() {
     users: [],
     admins: DEFAULT_ADMINS,
     favorites: {},
-    carts: {},
     analytics: { visits: [] },
     orders: [],
     reservations: {}
@@ -475,7 +480,6 @@ function normalizeDb(db) {
     users: existing.users || [],
     admins,
     favorites: existing.favorites || {},
-    carts: existing.carts || {},
     analytics: normalizeAnalytics(existing.analytics),
     orders: existing.orders || [],
     reservations: existing.reservations || {}
@@ -492,11 +496,36 @@ function preserveDbShape(db) {
     users: existing.users || [],
     admins: mergeDefaultAdmins(existing.admins || []),
     favorites: existing.favorites || {},
-    carts: existing.carts || {},
     analytics: normalizeAnalytics(existing.analytics),
     orders: existing.orders || [],
     reservations: existing.reservations || {}
   };
+}
+
+function mergeUsers(existingUsers = [], incomingUsers = []) {
+  const users = [...existingUsers];
+
+  incomingUsers.forEach((incomingUser) => {
+    const index = users.findIndex(
+      (user) =>
+        user.id === incomingUser.id ||
+        String(user.email || '').toLowerCase() === String(incomingUser.email || '').toLowerCase() ||
+        normalizeCpf(user.cpf) === normalizeCpf(incomingUser.cpf)
+    );
+
+    if (index >= 0) {
+      users[index] = {
+        ...users[index],
+        ...incomingUser,
+        password: users[index].password
+      };
+      return;
+    }
+
+    users.unshift(incomingUser);
+  });
+
+  return users;
 }
 
 function normalizeAnalytics(analytics) {
@@ -802,6 +831,23 @@ function isReservationActive(reservation, now) {
   return Boolean(reservation && (reservation.proofAttached || !reservation.expiresAt || reservation.expiresAt > now));
 }
 
+function reservationBelongsToUser(reservation, user) {
+  if (!reservation || !user) return false;
+  if (reservation.userId && reservation.userId === user.id) return true;
+  if (reservation.customerId && reservation.customerId === user.id) return true;
+  if (reservation.customerCpf && normalizeCpf(reservation.customerCpf) === normalizeCpf(user.cpf)) return true;
+  if (reservation.customerEmail && String(reservation.customerEmail).toLowerCase() === String(user.email || '').toLowerCase()) {
+    return true;
+  }
+  return false;
+}
+
+function getUserActiveReservations(reservations = {}, user, now = Date.now()) {
+  return Object.entries(reservations || {})
+    .filter(([, reservation]) => reservationBelongsToUser(reservation, user) && isReservationActive(reservation, now))
+    .map(([key, reservation]) => ({ key, reservation }));
+}
+
 function getReservedQuantity(product, reservations = {}, now = Date.now(), color) {
   return Object.entries(reservations || {}).reduce((total, [key, reservation]) => {
     if (!isReservationActive(reservation, now)) return total;
@@ -860,36 +906,6 @@ function stockSummary(product, reservations = {}, now = Date.now()) {
 
 function formatProductColorName(product, color) {
   return color ? `${product.name} - ${colorLabel(color)}` : product.name;
-}
-
-function normalizeCartEntries(entries, products = []) {
-  const productMap = new Map(products.map((product) => [product.id, product]));
-
-  return (Array.isArray(entries) ? entries : [])
-    .map((entry) => {
-      if (typeof entry === 'string') {
-        const product = productMap.get(entry);
-        const color = product ? getDisplayColor(product) : 'black';
-        return {
-          id: getReservationKey(entry, color),
-          productId: entry,
-          color
-        };
-      }
-
-      const productId = entry?.productId || entry?.id;
-      if (!productId) return null;
-
-      const product = productMap.get(productId);
-      const color = entry?.color || (product ? getDisplayColor(product) : 'black');
-
-      return {
-        id: entry?.id || getReservationKey(productId, color),
-        productId,
-        color
-      };
-    })
-    .filter(Boolean);
 }
 
 function withSelectedProductColor(product, color, reservations = {}, now = Date.now()) {
@@ -1007,8 +1023,6 @@ function applyFilters(items, filters, reservations = {}, now = Date.now()) {
 export default function App() {
   const [db, setDb] = useState(readDb);
   const [route, setRoute] = useState(getRoute);
-  const [checkout, setCheckout] = useState(null);
-  const [cartCheckout, setCartCheckout] = useState(null);
   const [now, setNow] = useState(Date.now());
   const [notice, setNotice] = useState('');
   const [currentUserId, setCurrentUserId] = useState(
@@ -1031,34 +1045,32 @@ export default function App() {
     () => (favoriteOwnerId ? new Set(db.favorites?.[favoriteOwnerId] || []) : new Set()),
     [db.favorites, favoriteOwnerId]
   );
-  const cartOwnerId = currentUser?.id || '';
-  const rawCartEntries = useMemo(
-    () => (cartOwnerId ? db.carts?.[cartOwnerId] || [] : []),
-    [cartOwnerId, db.carts]
-  );
-  const cartItems = useMemo(
-    () => normalizeCartEntries(rawCartEntries, db.products),
-    [rawCartEntries, db.products]
-  );
-  const cartProducts = useMemo(
-    () =>
-      cartItems
-        .map((item) => {
-          const product = db.products.find((entry) => entry.id === item.productId);
-          return product
-            ? { ...withSelectedProductColor(product, item.color, db.reservations, now), cartItemId: item.id }
-            : null;
-        })
-        .filter(Boolean),
-    [cartItems, db.products, db.reservations, now]
-  );
-
   useEffect(() => {
     writeDb(db);
   }, [db]);
 
   useEffect(() => {
     window.localStorage.removeItem(CURRENT_ADMIN_KEY);
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+
+    getUsers()
+      .then((payload) => {
+        if (!mounted) return;
+        updateDb((current) => ({
+          ...current,
+          users: mergeUsers(current.users, payload.users || [])
+        }));
+      })
+      .catch((error) => {
+        console.error(error);
+      });
+
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -1179,57 +1191,49 @@ export default function App() {
     return false;
   }
 
-  function loginUser(email, password) {
-    const user = db.users.find(
-      (item) => item.email.toLowerCase() === email.toLowerCase() && item.password === password
-    );
+  async function loginUser(email, password) {
+    try {
+      const payload = await loginUserAccount(email, password);
+      const user = payload.user;
 
-    if (!user) {
-      setNotice('Usuário ou senha inválidos.');
-      return;
+      updateDb((current) => ({ ...current, users: mergeUsers(current.users, [user]) }));
+      window.localStorage.removeItem(CURRENT_ADMIN_KEY);
+      window.sessionStorage.removeItem(CURRENT_ADMIN_KEY);
+      window.localStorage.setItem(CURRENT_USER_KEY, user.id);
+      setCurrentUserId(user.id);
+      setCurrentAdminId('');
+      setNotice(`Bem-vindo, ${user.name}.`);
+      navigate('/');
+    } catch (error) {
+      setNotice(error.message || 'Usuario ou senha invalidos.');
     }
-
-    window.localStorage.removeItem(CURRENT_ADMIN_KEY);
-    window.sessionStorage.removeItem(CURRENT_ADMIN_KEY);
-    window.localStorage.setItem(CURRENT_USER_KEY, user.id);
-    setCurrentUserId(user.id);
-    setCurrentAdminId('');
-    setNotice(`Bem-vindo, ${user.name}.`);
-    navigate('/');
   }
 
-  function registerUser(payload) {
+  async function registerUser(payload) {
     const cpf = normalizeCpf(payload.cpf);
     if (!isValidCpf(cpf)) {
       setNotice('Informe um CPF valido para abrir a conta.');
       return;
     }
 
-    if (db.users.some((user) => user.email.toLowerCase() === payload.email.toLowerCase())) {
-      setNotice('Esse e-mail já está cadastrado.');
-      return;
-    }
+    try {
+      const response = await createUserAccount({ ...payload, cpf });
+      const user = response.user;
 
-    if (
-      db.users.some((user) => normalizeCpf(user.cpf) === cpf) ||
-      db.admins.some((admin) => normalizeCpf(admin.cpf) === cpf)
-    ) {
-      setNotice('Esse CPF ja esta cadastrado.');
-      return;
+      updateDb((current) => ({ ...current, users: mergeUsers(current.users, [user]) }));
+      window.localStorage.removeItem(CURRENT_ADMIN_KEY);
+      window.sessionStorage.removeItem(CURRENT_ADMIN_KEY);
+      window.localStorage.setItem(CURRENT_USER_KEY, user.id);
+      setCurrentUserId(user.id);
+      setCurrentAdminId('');
+      setNotice('Cadastro criado e salvo no backend.');
+      navigate('/');
+    } catch (error) {
+      setNotice(error.message || 'Nao foi possivel criar o cadastro.');
     }
-
-    const user = { ...payload, cpf, id: createId(payload.email, 'user'), createdAt: new Date().toISOString() };
-    updateDb((current) => ({ ...current, users: [...current.users, user] }));
-    window.localStorage.removeItem(CURRENT_ADMIN_KEY);
-    window.sessionStorage.removeItem(CURRENT_ADMIN_KEY);
-    window.localStorage.setItem(CURRENT_USER_KEY, user.id);
-    setCurrentUserId(user.id);
-    setCurrentAdminId('');
-    setNotice('Cadastro criado.');
-    navigate('/');
   }
 
-  function updateUserProfile(payload) {
+  async function updateUserProfile(payload) {
     if (!currentUser) return false;
 
     const name = String(payload.name || '').trim();
@@ -1241,46 +1245,31 @@ export default function App() {
       return false;
     }
 
-    const emailAlreadyUsed = db.users.some(
-      (user) => user.id !== currentUser.id && user.email.toLowerCase() === email.toLowerCase()
-    );
+    try {
+      const response = await updateUserAccount(currentUser.id, {
+        name,
+        email,
+        phone
+      });
 
-    if (emailAlreadyUsed) {
-      setNotice('Esse e-mail ja esta cadastrado em outra conta.');
+      updateDb((current) => ({
+        ...current,
+        users: mergeUsers(current.users, [response.user])
+      }));
+
+      setNotice('Dados do perfil atualizados no backend.');
+      return true;
+    } catch (error) {
+      setNotice(error.message || 'Nao foi possivel atualizar o perfil.');
       return false;
     }
-
-    updateDb((current) => ({
-      ...current,
-      users: current.users.map((user) =>
-        user.id === currentUser.id
-          ? {
-              ...user,
-              name,
-              email,
-              phone,
-              cpf: currentUser.cpf,
-              updatedAt: new Date().toISOString()
-            }
-          : user
-      )
-    }));
-
-    setNotice('Dados do perfil atualizados.');
-    return true;
   }
 
-  function changeUserPassword(payload) {
+  async function changeUserPassword(payload) {
     if (!currentUser) return false;
 
-    const currentPassword = String(payload.currentPassword || '');
     const newPassword = String(payload.newPassword || '');
     const confirmPassword = String(payload.confirmPassword || '');
-
-    if (currentUser.password !== currentPassword) {
-      setNotice('Senha atual invalida.');
-      return false;
-    }
 
     if (newPassword.length < 4) {
       setNotice('A nova senha precisa ter pelo menos 4 caracteres.');
@@ -1292,17 +1281,14 @@ export default function App() {
       return false;
     }
 
-    updateDb((current) => ({
-      ...current,
-      users: current.users.map((user) =>
-        user.id === currentUser.id
-          ? { ...user, password: newPassword, passwordUpdatedAt: new Date().toISOString() }
-          : user
-      )
-    }));
-
-    setNotice('Senha alterada.');
-    return true;
+    try {
+      await changeUserAccountPassword(currentUser.id, payload);
+      setNotice('Senha alterada no backend.');
+      return true;
+    } catch (error) {
+      setNotice(error.message || 'Nao foi possivel alterar a senha.');
+      return false;
+    }
   }
 
   function logoutUser() {
@@ -1386,6 +1372,13 @@ export default function App() {
   function upsertReservation(product, mode, color) {
     if (!requireUserAccount(mode === 'reserve' ? 'Reservar' : 'Comprar')) return;
 
+    const activeReservation = getUserActiveReservations(db.reservations, currentUser, now)[0];
+    if (activeReservation) {
+      setNotice('Conclua ou aguarde a validação da sua compra/reserva atual antes de iniciar outra.');
+      navigate('/perfil');
+      return;
+    }
+
     const selectedColor = getAvailableStockColor(
       product,
       db.reservations,
@@ -1404,6 +1397,11 @@ export default function App() {
       productId: product.id,
       color: selectedColor,
       quantity: 1,
+      userId: currentUser.id,
+      customerId: currentUser.id,
+      customerName: currentUser.name,
+      customerEmail: currentUser.email,
+      customerCpf: currentUser.cpf,
       mode,
       percent,
       amount: product.price * (percent / 100),
@@ -1418,22 +1416,24 @@ export default function App() {
       ...current,
       reservations: { ...current.reservations, [reservationKey]: reservation }
     }));
-    setCheckout(reservationKey);
+    setNotice(`${mode === 'reserve' ? 'Reserva' : 'Compra'} iniciada. Conclua pelo seu perfil em ate 5 minutos.`);
+    navigate('/perfil');
   }
 
-  async function attachReceipt(file) {
-    if (!checkout || !file) return;
+  async function attachReceipt(file, reservationKey) {
+    if (!file) return;
+    const activeReservationKey = reservationKey || getUserActiveReservations(db.reservations, currentUser, now)[0]?.key;
+    if (!activeReservationKey) return;
     if (!currentUser) {
-      setCheckout(null);
       setNotice('Entre ou crie uma conta para concluir a compra.');
       navigate('/cadastro');
       return;
     }
 
-    const reservation = db.reservations[checkout];
-    const product = db.products.find((item) => item.id === (reservation?.productId || checkout));
+    const reservation = db.reservations[activeReservationKey];
+    const product = db.products.find((item) => item.id === (reservation?.productId || activeReservationKey));
     if (!product || !reservation) return;
-    const selectedColor = getReservationColor(checkout, reservation, product);
+    const selectedColor = getReservationColor(activeReservationKey, reservation, product);
 
     let receiptFile;
     try {
@@ -1449,7 +1449,7 @@ export default function App() {
       productId: product.id,
       productColor: selectedColor,
       productName: formatProductColorName(product, selectedColor),
-      reservationKeys: [checkout],
+      reservationKeys: [activeReservationKey],
       items: [
         {
           productId: product.id,
@@ -1485,8 +1485,8 @@ export default function App() {
         orders,
         reservations: {
           ...current.reservations,
-          [checkout]: {
-            ...current.reservations[checkout],
+          [activeReservationKey]: {
+            ...current.reservations[activeReservationKey],
             proofAttached: true,
             receiptName: receiptFile.name,
             receiptType: receiptFile.type,
@@ -1499,239 +1499,6 @@ export default function App() {
     });
 
     setNotice('Comprovante enviado para validação no painel admin.');
-  }
-
-  function addToCart(product, color) {
-    if (!requireUserAccount('Adicionar ao carrinho')) return;
-
-    const selectedColor = getAvailableStockColor(
-      product,
-      db.reservations,
-      now,
-      color || product.selectedColor || product.color
-    );
-
-    if (!selectedColor) {
-      setNotice('Esse produto nao esta disponivel para adicionar ao carrinho.');
-      return;
-    }
-
-    const status = getProductStatus(product, db.reservations, now, selectedColor);
-    if (status.blocked) {
-      setNotice('Esse produto nao esta disponivel para adicionar ao carrinho.');
-      return;
-    }
-
-    const cartItemId = getReservationKey(product.id, selectedColor);
-
-    if (cartItems.some((item) => item.id === cartItemId)) {
-      setNotice('Esse produto nessa cor ja esta no carrinho.');
-      navigate('/carrinho');
-      return;
-    }
-
-    const cartEntry = {
-      id: cartItemId,
-      productId: product.id,
-      color: selectedColor
-    };
-
-    updateDb((current) => ({
-      ...current,
-      carts: {
-        ...(current.carts || {}),
-        [cartOwnerId]: [...normalizeCartEntries(current.carts?.[cartOwnerId] || [], current.products), cartEntry]
-      }
-    }));
-
-    setNotice(`${formatProductColorName(product, selectedColor)} adicionado ao carrinho.`);
-  }
-
-  function removeFromCart(cartItemId) {
-    if (!cartOwnerId) return;
-
-    updateDb((current) => ({
-      ...current,
-      carts: {
-        ...(current.carts || {}),
-        [cartOwnerId]: normalizeCartEntries(current.carts?.[cartOwnerId] || [], current.products).filter(
-          (item) => item.id !== cartItemId
-        )
-      }
-    }));
-    setNotice('Produto removido do carrinho.');
-  }
-
-  function clearCart() {
-    if (!cartOwnerId) return;
-
-    updateDb((current) => ({
-      ...current,
-      carts: {
-        ...(current.carts || {}),
-        [cartOwnerId]: []
-      }
-    }));
-    setNotice('Carrinho limpo.');
-  }
-
-  function upsertCartReservation() {
-    if (!requireUserAccount('Comprar pelo carrinho')) return;
-
-    const availableProducts = cartProducts.filter(
-      (product) => !getProductStatus(product, db.reservations, now, product.selectedColor).blocked
-    );
-
-    if (!availableProducts.length) {
-      setNotice('Nao ha produtos disponiveis no carrinho para comprar.');
-      return;
-    }
-
-    const cartId = createId(`${currentUser.id}-carrinho`, 'cart');
-    const expiresAt = Date.now() + RESERVATION_MS;
-
-    updateDb((current) => {
-      const reservations = { ...(current.reservations || {}) };
-      availableProducts.forEach((product) => {
-        const reservationKey = getReservationKey(product.id, product.selectedColor);
-        reservations[reservationKey] = {
-          productId: product.id,
-          color: product.selectedColor,
-          quantity: 1,
-          mode: 'cart',
-          cartId,
-          percent: 100,
-          amount: product.price,
-          expiresAt,
-          proofAttached: false,
-          receiptName: '',
-          orderId: '',
-          createdAt: new Date().toISOString()
-        };
-      });
-
-      return { ...current, reservations };
-    });
-
-    setCartCheckout({
-      id: cartId,
-      items: availableProducts.map((product) => ({ productId: product.id, color: product.selectedColor })),
-      productIds: availableProducts.map((product) => product.id)
-    });
-  }
-
-  async function attachCartReceipt(file) {
-    if (!cartCheckout || !file) return;
-    if (!currentUser) {
-      setCartCheckout(null);
-      setNotice('Entre ou crie uma conta para concluir a compra.');
-      navigate('/cadastro');
-      return;
-    }
-
-    const checkoutItems = Array.isArray(cartCheckout.items) && cartCheckout.items.length
-      ? cartCheckout.items
-      : (cartCheckout.productIds || []).map((productId) => ({ productId }));
-    const productsInCheckout = checkoutItems
-      .map((item) => {
-        const product = db.products.find((entry) => entry.id === item.productId);
-        return product ? withSelectedProductColor(product, item.color, db.reservations, now) : null;
-      })
-      .filter(Boolean);
-
-    if (!productsInCheckout.length) return;
-
-    const reservationKeys = productsInCheckout.map((product) => getReservationKey(product.id, product.selectedColor));
-    const checkoutReservations = reservationKeys
-      .map((key) => db.reservations?.[key])
-      .filter((reservation) => reservation?.cartId === cartCheckout.id);
-
-    if (checkoutReservations.length !== productsInCheckout.length) {
-      setNotice('A reserva do carrinho expirou. Tente comprar novamente.');
-      setCartCheckout(null);
-      return;
-    }
-
-    let receiptFile;
-    try {
-      receiptFile = await readReceiptFile(file);
-    } catch {
-      setNotice('Nao foi possivel ler o comprovante. Tente anexar novamente.');
-      return;
-    }
-
-    const orderId =
-      checkoutReservations.find((reservation) => reservation.orderId)?.orderId ||
-      createId(`${cartCheckout.id}-pedido`, 'order');
-    const amount = productsInCheckout.reduce((total, product) => total + product.price, 0);
-    const items = productsInCheckout.map((product) => ({
-      productId: product.id,
-      productName: product.name,
-      color: product.selectedColor,
-      colorLabel: colorLabel(product.selectedColor),
-      amount: product.price,
-      condition: product.condition,
-      quantity: 1
-    }));
-    const order = {
-      id: orderId,
-      productId: productsInCheckout[0]?.id || '',
-      productIds: productsInCheckout.map((product) => product.id),
-      reservationKeys,
-      productName:
-        productsInCheckout.length === 1
-          ? formatProductColorName(productsInCheckout[0], productsInCheckout[0].selectedColor)
-          : `Carrinho (${productsInCheckout.length} produtos)`,
-      items,
-      customerId: currentUser.id,
-      customerName: currentUser.name,
-      customerEmail: currentUser.email,
-      customerCpf: currentUser.cpf,
-      amount,
-      percent: 100,
-      mode: 'cart',
-      receiptName: receiptFile.name,
-      receiptType: receiptFile.type,
-      receiptDataUrl: receiptFile.dataUrl,
-      status: 'pending',
-      createdAt: new Date().toISOString()
-    };
-
-    updateDb((current) => {
-      const orders = current.orders.some((item) => item.id === orderId)
-        ? current.orders.map((item) => (item.id === orderId ? { ...item, ...order } : item))
-        : [...current.orders, order];
-      const reservations = { ...(current.reservations || {}) };
-
-      productsInCheckout.forEach((product) => {
-        const reservationKey = getReservationKey(product.id, product.selectedColor);
-        reservations[reservationKey] = {
-          ...reservations[reservationKey],
-          proofAttached: true,
-          receiptName: receiptFile.name,
-          receiptType: receiptFile.type,
-          receiptDataUrl: receiptFile.dataUrl,
-          orderId,
-          expiresAt: null
-        };
-      });
-
-      const currentCart = normalizeCartEntries(current.carts?.[cartOwnerId] || [], current.products);
-      const purchasedIds = new Set(productsInCheckout.map((product) => getReservationKey(product.id, product.selectedColor)));
-
-      return {
-        ...current,
-        orders,
-        reservations,
-        carts: {
-          ...(current.carts || {}),
-          [cartOwnerId]: currentCart.filter((item) => !purchasedIds.has(item.id))
-        }
-      };
-    });
-
-    setCartCheckout(null);
-    setNotice('Comprovante do carrinho enviado para validacao no painel admin.');
   }
 
   function copyPixKey() {
@@ -1776,7 +1543,6 @@ export default function App() {
           now={now}
           favoriteIds={favoriteIds}
           onCheckout={upsertReservation}
-          onAddToCart={addToCart}
           onToggleFavorite={toggleFavorite}
         />
       );
@@ -1794,7 +1560,6 @@ export default function App() {
           now={now}
           navigate={navigate}
           onCheckout={upsertReservation}
-          onAddToCart={addToCart}
           favoriteIds={favoriteIds}
           onToggleFavorite={toggleFavorite}
         />
@@ -1819,27 +1584,8 @@ export default function App() {
           now={now}
           navigate={navigate}
           onCheckout={upsertReservation}
-          onAddToCart={addToCart}
           favoriteIds={favoriteIds}
           onToggleFavorite={toggleFavorite}
-        />
-      );
-    }
-
-    if (route.first === 'carrinho') {
-      if (!currentUser) {
-        return <AuthRequiredPage navigate={navigate} />;
-      }
-
-      return (
-        <CartPage
-          products={cartProducts}
-          reservations={db.reservations}
-          now={now}
-          navigate={navigate}
-          onRemove={removeFromCart}
-          onClear={clearCart}
-          onCheckout={upsertCartReservation}
         />
       );
     }
@@ -1864,7 +1610,8 @@ export default function App() {
           onChangePassword={changeUserPassword}
           onLogout={logoutUser}
           onCheckout={upsertReservation}
-          onAddToCart={addToCart}
+          onReceipt={attachReceipt}
+          onCopyPix={copyPixKey}
           onToggleFavorite={toggleFavorite}
         />
       );
@@ -1885,7 +1632,6 @@ export default function App() {
           now={now}
           navigate={navigate}
           onCheckout={upsertReservation}
-          onAddToCart={addToCart}
           favoriteIds={favoriteIds}
           onToggleFavorite={toggleFavorite}
         />
@@ -1906,7 +1652,6 @@ export default function App() {
           now={now}
           navigate={navigate}
           onCheckout={upsertReservation}
-          onAddToCart={addToCart}
           isFavorite={favoriteIds.has(product.id)}
           favoriteIds={favoriteIds}
           onToggleFavorite={toggleFavorite}
@@ -1947,43 +1692,11 @@ export default function App() {
         categories={navCategories}
         currentUser={currentUser}
         favoriteCount={favoriteIds.size}
-        cartCount={cartProducts.length}
         route={route}
         navigate={navigate}
       />
       <main>{renderPage()}</main>
       <Footer settings={db.settings} categories={navCategories} navigate={navigate} />
-      {checkout ? (
-        <CheckoutModal
-          product={(() => {
-            const reservation = db.reservations[checkout];
-            const product = db.products.find((item) => item.id === (reservation?.productId || checkout));
-            return product ? withSelectedProductColor(product, getReservationColor(checkout, reservation, product)) : null;
-          })()}
-          reservation={db.reservations[checkout]}
-          settings={db.settings}
-          now={now}
-          onClose={() => setCheckout(null)}
-          onReceipt={attachReceipt}
-          onCopyPix={copyPixKey}
-        />
-      ) : null}
-      {cartCheckout ? (
-        <CartCheckoutModal
-          products={(cartCheckout.items || (cartCheckout.productIds || []).map((productId) => ({ productId })))
-            .map((item) => {
-              const product = db.products.find((entry) => entry.id === item.productId);
-              return product ? withSelectedProductColor(product, item.color, db.reservations, now) : null;
-            })
-            .filter(Boolean)}
-          reservations={db.reservations}
-          settings={db.settings}
-          now={now}
-          onClose={() => setCartCheckout(null)}
-          onReceipt={attachCartReceipt}
-          onCopyPix={copyPixKey}
-        />
-      ) : null}
       {notice ? <div className="toast" role="status">{notice}</div> : null}
     </>
   );
@@ -2005,7 +1718,7 @@ function AppLink({ to, navigate, children, className, scrollTarget, ...props }) 
   );
 }
 
-function Navbar({ settings, categories, currentUser, favoriteCount, cartCount, route, navigate }) {
+function Navbar({ settings, categories, currentUser, favoriteCount, route, navigate }) {
   return (
     <header className="site-header">
       <div className="top-line" />
@@ -2041,10 +1754,6 @@ function Navbar({ settings, categories, currentUser, favoriteCount, cartCount, r
             <ShoppingBag size={16} aria-hidden="true" />
             Comprar
           </AppLink>
-          <AppLink className="nav-cart" to="/carrinho" navigate={navigate} aria-label="Ver carrinho">
-            <ShoppingCart size={16} aria-hidden="true" />
-            {cartCount ? <span>{cartCount}</span> : null}
-          </AppLink>
           <AppLink className="nav-favorite" to="/favoritos" navigate={navigate} aria-label="Ver favoritos">
             <Heart size={16} aria-hidden="true" />
             {favoriteCount ? <span>{favoriteCount}</span> : null}
@@ -2055,7 +1764,7 @@ function Navbar({ settings, categories, currentUser, favoriteCount, cartCount, r
   );
 }
 
-function HomePage({ db, navCategories, homeCategories, navigate, now, favoriteIds, onCheckout, onAddToCart, onToggleFavorite }) {
+function HomePage({ db, navCategories, homeCategories, navigate, now, favoriteIds, onCheckout, onToggleFavorite }) {
   const featured = db.products.filter((product) => product.featured).slice(0, 8);
 
   return (
@@ -2122,7 +1831,6 @@ function HomePage({ db, navCategories, homeCategories, navigate, now, favoriteId
                 now={now}
                 navigate={navigate}
                 onCheckout={onCheckout}
-                onAddToCart={onAddToCart}
                 isFavorite={favoriteIds.has(product.id)}
                 onToggleFavorite={onToggleFavorite}
               />
@@ -2146,7 +1854,6 @@ function CollectionPage({
   now,
   navigate,
   onCheckout,
-  onAddToCart,
   favoriteIds,
   onToggleFavorite
 }) {
@@ -2186,7 +1893,7 @@ function CollectionPage({
             {category.name}
           </AppLink>
         ))}
-      </div>
+    </div>
 
       <section className="section collection-products">
         <ProductFilters
@@ -2206,7 +1913,6 @@ function CollectionPage({
               now={now}
               navigate={navigate}
               onCheckout={onCheckout}
-              onAddToCart={onAddToCart}
               isFavorite={favoriteIds.has(product.id)}
               onToggleFavorite={onToggleFavorite}
             />
@@ -2315,7 +2021,6 @@ function ProductPage({
   now,
   navigate,
   onCheckout,
-  onAddToCart,
   isFavorite,
   favoriteIds,
   onToggleFavorite
@@ -2406,17 +2111,6 @@ function ProductPage({
               >
                 Reservar com 50%
               </button>
-              <button
-                className="product-button cart-detail-button"
-                type="button"
-                disabled={status.blocked}
-                onClick={() => onAddToCart(product, activeColor)}
-                aria-label={`Adicionar ${product.name} ao carrinho`}
-                title="Adicionar ao carrinho"
-              >
-                <ShoppingCart size={17} aria-hidden="true" />
-                Carrinho
-              </button>
               <a className="product-button secondary" href={getWhatsAppUrl(settings)} target="_blank" rel="noreferrer">
                 Tirar dúvida
               </a>
@@ -2461,7 +2155,6 @@ function ProductPage({
               now={now}
               navigate={navigate}
               onCheckout={onCheckout}
-              onAddToCart={onAddToCart}
               isFavorite={favoriteIds.has(item.id)}
               onToggleFavorite={onToggleFavorite}
             />
@@ -2486,7 +2179,6 @@ function ProductPage({
                   now={now}
                   navigate={navigate}
                   onCheckout={onCheckout}
-                  onAddToCart={onAddToCart}
                   isFavorite={favoriteIds.has(item.id)}
                   onToggleFavorite={onToggleFavorite}
                 />
@@ -2499,7 +2191,7 @@ function ProductPage({
   );
 }
 
-function HomeProductCard({ product, reservations, now, navigate, onCheckout, onAddToCart, isFavorite, onToggleFavorite }) {
+function HomeProductCard({ product, reservations, now, navigate, onCheckout, isFavorite, onToggleFavorite }) {
   const status = getProductStatus(product, reservations, now);
   const selectedColor = getAvailableStockColor(product, reservations, now, product.color);
   const displayProduct = withSelectedProductColor(product, selectedColor, reservations, now);
@@ -2524,22 +2216,12 @@ function HomeProductCard({ product, reservations, now, navigate, onCheckout, onA
         <button type="button" disabled={status.blocked} onClick={() => onCheckout(product, 'buy', selectedColor)}>
           Comprar agora
         </button>
-        <button
-          className="cart-icon-button"
-          type="button"
-          disabled={status.blocked}
-          onClick={() => onAddToCart(product, selectedColor)}
-          aria-label={`Adicionar ${product.name} ao carrinho`}
-          title="Adicionar ao carrinho"
-        >
-          <ShoppingCart size={16} aria-hidden="true" />
-        </button>
       </div>
     </article>
   );
 }
 
-function ProductCard({ product, reservations, now, navigate, onCheckout, onAddToCart, isFavorite, onToggleFavorite }) {
+function ProductCard({ product, reservations, now, navigate, onCheckout, isFavorite, onToggleFavorite }) {
   const status = getProductStatus(product, reservations, now);
   const selectedColor = getAvailableStockColor(product, reservations, now, product.color);
   const displayProduct = withSelectedProductColor(product, selectedColor, reservations, now);
@@ -2576,16 +2258,6 @@ function ProductCard({ product, reservations, now, navigate, onCheckout, onAddTo
           onClick={() => onCheckout(product, 'reserve', selectedColor)}
         >
           Reservar
-        </button>
-        <button
-          className="cart-icon-button"
-          type="button"
-          disabled={status.blocked}
-          onClick={() => onAddToCart(product, selectedColor)}
-          aria-label={`Adicionar ${product.name} ao carrinho`}
-          title="Adicionar ao carrinho"
-        >
-          <ShoppingCart size={16} aria-hidden="true" />
         </button>
       </div>
     </article>
@@ -2716,97 +2388,6 @@ function AuthRequiredPage({ navigate }) {
   );
 }
 
-function CartPage({ products, reservations, now, navigate, onRemove, onClear, onCheckout }) {
-  const rows = products.map((product) => ({
-    product,
-    status: getProductStatus(product, reservations, now, product.selectedColor)
-  }));
-  const availableRows = rows.filter((row) => !row.status.blocked);
-  const total = availableRows.reduce((sum, row) => sum + row.product.price, 0);
-
-  return (
-    <section className="cart-page">
-      <Breadcrumb navigate={navigate} items={[{ label: 'Inicio', to: '/' }]} current="Carrinho" />
-
-      <div className="cart-header">
-        <div>
-          <p className="section-label">Carrinho</p>
-          <h1>Produtos selecionados</h1>
-          <p>Revise os produtos antes de enviar um unico comprovante para a compra.</p>
-        </div>
-        {products.length ? (
-          <button className="button secondary" type="button" onClick={onClear}>
-            <Trash2 size={17} aria-hidden="true" />
-            Limpar
-          </button>
-        ) : null}
-      </div>
-
-      {products.length ? (
-        <div className="cart-layout">
-          <div className="cart-list">
-            {rows.map(({ product, status }) => (
-              <article className={`cart-item ${status.blocked ? 'is-blocked' : ''}`} key={product.id}>
-                <ProductVisual product={product} />
-                <div className="cart-item-copy">
-                  <div>
-                    <span className={`stock-badge ${status.blocked ? 'blocked' : 'available'}`}>
-                      {status.label}
-                    </span>
-                    <h2>{product.name}</h2>
-                    <p>{product.description}</p>
-                  </div>
-                  <div className="cart-item-meta">
-                    <span>{product.condition}</span>
-                    <span>{colorLabel(product.selectedColor || product.color)}</span>
-                  </div>
-                </div>
-                <div className="cart-item-actions">
-                  <strong>{currency.format(product.price)}</strong>
-                  <button type="button" onClick={() => onRemove(product.cartItemId)}>
-                    <Trash2 size={16} aria-hidden="true" />
-                    Remover
-                  </button>
-                </div>
-              </article>
-            ))}
-          </div>
-
-          <aside className="cart-summary">
-            <span className="section-label">Resumo</span>
-            <div className="cart-summary-line">
-              <span>Produtos disponiveis</span>
-              <strong>{availableRows.length}</strong>
-            </div>
-            <div className="cart-summary-line">
-              <span>Total</span>
-              <strong>{currency.format(total)}</strong>
-            </div>
-            {rows.length !== availableRows.length ? (
-              <p className="field-hint">Produtos indisponiveis nao entram no total.</p>
-            ) : null}
-            <button className="button primary" type="button" disabled={!availableRows.length} onClick={onCheckout}>
-              <ShoppingCart size={17} aria-hidden="true" />
-              Comprar carrinho
-            </button>
-            <AppLink className="button secondary" to="/produtos" navigate={navigate}>
-              Continuar comprando
-            </AppLink>
-          </aside>
-        </div>
-      ) : (
-        <div className="profile-empty cart-empty">
-          <ShoppingCart size={28} aria-hidden="true" />
-          <h2>Seu carrinho esta vazio</h2>
-          <AppLink className="button primary" to="/produtos" navigate={navigate}>
-            Ver produtos
-          </AppLink>
-        </div>
-      )}
-    </section>
-  );
-}
-
 function UserAuthPage({ mode, navigate, onLogin, onRegister }) {
   const [form, setForm] = useState({ name: '', email: '', cpf: '', phone: '', password: '' });
   const isRegister = mode === 'register';
@@ -2913,7 +2494,8 @@ function CustomerProfilePage({
   onChangePassword,
   onLogout,
   onCheckout,
-  onAddToCart,
+  onReceipt,
+  onCopyPix,
   onToggleFavorite
 }) {
   const [profileForm, setProfileForm] = useState({
@@ -2954,10 +2536,11 @@ function CustomerProfilePage({
   }, [db.orders, user.cpf, user.email, user.id]);
 
   const pendingOrders = customerOrders.filter((order) => order.status === 'pending').length;
+  const activeReservationEntries = getUserActiveReservations(reservations, user, now);
 
-  function submitProfile(event) {
+  async function submitProfile(event) {
     event.preventDefault();
-    const updated = onUpdateProfile(profileForm);
+    const updated = await onUpdateProfile(profileForm);
     if (updated) {
       setEditingProfile(false);
     }
@@ -2977,9 +2560,9 @@ function CustomerProfilePage({
     setEditingProfile(false);
   }
 
-  function submitPassword(event) {
+  async function submitPassword(event) {
     event.preventDefault();
-    const changed = onChangePassword(passwordForm);
+    const changed = await onChangePassword(passwordForm);
     if (changed) {
       setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
     }
@@ -3024,6 +2607,44 @@ function CustomerProfilePage({
           <strong>{favoriteProducts.length}</strong>
         </div>
       </div>
+
+      <section className="profile-section">
+        <div className="profile-section-header">
+          <div>
+            <p className="section-label">Compra em andamento</p>
+            <h2>Concluir compra ou reserva</h2>
+          </div>
+          <Clock size={24} aria-hidden="true" />
+        </div>
+
+        {activeReservationEntries.length ? (
+          <div className="order-list">
+            {activeReservationEntries.map(({ key, reservation }) => {
+              const product = db.products.find((item) => item.id === reservation.productId);
+              return product ? (
+                <ActiveReservationCard
+                  key={key}
+                  reservationKey={key}
+                  reservation={reservation}
+                  product={withSelectedProductColor(product, getReservationColor(key, reservation, product), reservations, now)}
+                  settings={db.settings}
+                  now={now}
+                  onReceipt={onReceipt}
+                  onCopyPix={onCopyPix}
+                />
+              ) : null;
+            })}
+          </div>
+        ) : (
+          <div className="profile-empty">
+            <ShoppingBag size={26} aria-hidden="true" />
+            <h3>Nenhuma compra ou reserva em andamento</h3>
+            <AppLink className="button primary" to="/produtos" navigate={navigate}>
+              Ver produtos
+            </AppLink>
+          </div>
+        )}
+      </section>
 
       <div className="profile-form-grid">
         <form className="profile-card stack-form" onSubmit={submitProfile}>
@@ -3206,7 +2827,6 @@ function CustomerProfilePage({
                 now={now}
                 navigate={navigate}
                 onCheckout={onCheckout}
-                onAddToCart={onAddToCart}
                 isFavorite={favoriteIds.has(product.id)}
                 onToggleFavorite={onToggleFavorite}
               />
@@ -3226,6 +2846,85 @@ function CustomerProfilePage({
   );
 }
 
+function ActiveReservationCard({ reservationKey, reservation, product, settings, now, onReceipt, onCopyPix }) {
+  const [selectedReceipt, setSelectedReceipt] = useState(null);
+  const remaining = reservation.expiresAt ? reservation.expiresAt - now : 0;
+  const selectedColor = reservation.color || product.selectedColor || product.color;
+  const paymentLabel = reservation.percent === 50 ? '50% do valor' : '100% do valor';
+  const statusLabel = reservation.proofAttached ? 'Comprovante enviado' : formatTimer(remaining);
+
+  useEffect(() => {
+    setSelectedReceipt(null);
+  }, [reservationKey, reservation.proofAttached]);
+
+  function sendReceipt() {
+    if (!selectedReceipt) return;
+    onReceipt(selectedReceipt, reservationKey);
+  }
+
+  return (
+    <article className="order-card active-reservation-card">
+      <ProductVisual product={product} />
+      <div>
+        <div className="order-title-row">
+          <span className={`order-status ${reservation.proofAttached ? 'pending' : 'received'}`}>
+            {reservation.mode === 'reserve' ? 'Reserva' : 'Compra'}
+          </span>
+          <strong className="timer">{statusLabel}</strong>
+        </div>
+        <h3>{formatProductColorName(product, selectedColor)}</h3>
+        <p>
+          {paymentLabel} - {currency.format(reservation.amount)}
+        </p>
+      </div>
+      <dl className="order-details">
+        <div>
+          <dt>Cor</dt>
+          <dd>{colorLabel(selectedColor)}</dd>
+        </div>
+        <div>
+          <dt>Pix</dt>
+          <dd>{settings.pixKey}</dd>
+        </div>
+        <div>
+          <dt>Comprovante</dt>
+          <dd>{reservation.receiptName || 'Pendente'}</dd>
+        </div>
+      </dl>
+
+      {!reservation.proofAttached ? (
+        <div className="modal-actions profile-reservation-actions">
+          <label className="file-button">
+            <Upload size={17} aria-hidden="true" />
+            Escolher comprovante
+            <input
+              type="file"
+              accept="image/*,.pdf"
+              onChange={(event) => setSelectedReceipt(event.target.files?.[0] || null)}
+            />
+          </label>
+          <button className="button primary" type="button" disabled={!selectedReceipt} onClick={sendReceipt}>
+            <Upload size={17} aria-hidden="true" />
+            Enviar comprovante
+          </button>
+          <button className="button secondary" type="button" onClick={onCopyPix}>
+            <Copy size={17} aria-hidden="true" />
+            Copiar chave Pix
+          </button>
+        </div>
+      ) : (
+        <p className="modal-feedback">
+          Comprovante anexado. Aguarde a validação do administrador para liberar uma nova compra ou reserva.
+        </p>
+      )}
+
+      {selectedReceipt && !reservation.proofAttached ? (
+        <p className="selected-receipt">Arquivo selecionado: {selectedReceipt.name}</p>
+      ) : null}
+    </article>
+  );
+}
+
 function orderTime(order) {
   const timestamp = new Date(order.validatedAt || order.createdAt || 0).getTime();
   return Number.isNaN(timestamp) ? 0 : timestamp;
@@ -3238,7 +2937,6 @@ function orderStatusLabel(status) {
 }
 
 function orderModeLabel(order) {
-  if (order.mode === 'cart') return 'Compra pelo carrinho';
   return order.mode === 'reserve' ? `Reserva ${order.percent || 50}%` : 'Compra';
 }
 
@@ -3427,7 +3125,7 @@ function AdminPanel({ db, admin, onLogout, updateDb, setNotice }) {
       {tab === 'products' ? <ProductManager db={db} updateDb={updateDb} setNotice={setNotice} /> : null}
       {tab === 'categories' ? <CategoryManager db={db} updateDb={updateDb} setNotice={setNotice} /> : null}
       {tab === 'receipts' ? <ReceiptManager db={db} updateDb={updateDb} setNotice={setNotice} /> : null}
-      {tab === 'sales' ? <SalesManager orders={db.orders} /> : null}
+      {tab === 'sales' ? <SalesManager db={db} updateDb={updateDb} setNotice={setNotice} /> : null}
       {tab === 'admins' ? <AdminApproval db={db} updateDb={updateDb} setNotice={setNotice} /> : null}
     </section>
   );
@@ -3537,7 +3235,7 @@ function DashboardManager({ db }) {
           detail={`${activeUsersToday} usuario(s) ativos`}
         />
         <DashboardStat
-          icon={ShoppingCart}
+          icon={ShoppingBag}
           label="Ticket medio"
           value={currency.format(averageTicket)}
           detail={`${soldUnits} item(ns) vendidos`}
@@ -3767,6 +3465,22 @@ function getOrderItems(order) {
       quantity: 1
     }
   ];
+}
+
+function applyAmountToOrderItems(orderItems, amount) {
+  const items = Array.isArray(orderItems) ? orderItems : [];
+  if (!items.length) return [];
+
+  const total = items.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  if (!total) {
+    const splitAmount = amount / items.length;
+    return items.map((item) => ({ ...item, amount: splitAmount }));
+  }
+
+  return items.map((item) => ({
+    ...item,
+    amount: (amount * Number(item.amount || 0)) / total
+  }));
 }
 
 function buildProductRanking(sales) {
@@ -4003,7 +3717,7 @@ function ProductManager({ db, updateDb, setNotice }) {
   }
 
   return (
-    <div className="admin-grid">
+    <div className="product-manager-layout">
       <form className="admin-card stack-form product-form" onSubmit={submit}>
         <h2>{editing ? 'Alterar produto' : 'Adicionar produto'}</h2>
         <div className="form-grid">
@@ -4179,22 +3893,25 @@ function ProductManager({ db, updateDb, setNotice }) {
         </div>
       </form>
 
-      <div className="admin-card">
+      <div className="admin-card product-list-card">
         <h2>Produtos cadastrados</h2>
         <div className="admin-list">
           {db.products.map((product) => (
-            <div className="admin-list-row" key={product.id}>
-              <span>
-                <strong>{product.name}</strong>
-                <small>
+            <div className="admin-list-row product-admin-row" key={product.id}>
+              <div className="product-admin-summary">
+                <ProductAdminImages product={product} />
+                <span>
+                  <strong>{product.name}</strong>
+                  <small>
                   {categoryLabel(db.categories, product.category)} · {currency.format(product.price)} ·{' '}
                   {getTotalStock(product)} un. ·{' '}
                   {getProductStock(product)
                     .filter((item) => item.quantity > 0)
                     .map((item) => `${colorLabel(item.color)} (${item.quantity})`)
                     .join(', ') || 'sem estoque'}
-                </small>
-              </span>
+                  </small>
+                </span>
+              </div>
               <button type="button" onClick={() => edit(product)}>
                 Editar
               </button>
@@ -4205,6 +3922,26 @@ function ProductManager({ db, updateDb, setNotice }) {
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+function ProductAdminImages({ product }) {
+  const images = getProductImages(product);
+
+  if (!images.length) {
+    return (
+      <div className="product-admin-images empty" aria-label={`Sem imagem cadastrada para ${product.name}`}>
+        <DeviceShape visual={product.visual} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="product-admin-images" aria-label={`Imagens de ${product.name}`}>
+      {images.map((image, index) => (
+        <img src={image.url} alt={image.alt || `Imagem ${index + 1} de ${product.name}`} key={image.id} />
+      ))}
     </div>
   );
 }
@@ -4220,13 +3957,60 @@ function CategoryManager({ db, updateDb, setNotice }) {
     home: true
   };
   const [form, setForm] = useState(empty);
+  const [editingSlug, setEditingSlug] = useState('');
+  const editing = Boolean(editingSlug);
+
+  function reset() {
+    setForm(empty);
+    setEditingSlug('');
+  }
+
+  function edit(category) {
+    setEditingSlug(category.slug);
+    setForm({
+      name: category.name || '',
+      slug: category.slug || '',
+      title: category.title || category.name || '',
+      description: category.description || '',
+      icon: category.icon || 'smartphone',
+      nav: category.nav !== false,
+      home: category.home !== false
+    });
+  }
 
   function submit(event) {
     event.preventDefault();
-    const slug = form.slug || createId(form.name, 'category').replace(/-\w+$/, '');
+    const name = String(form.name || '').trim();
+    const slug = String(form.slug || createId(name, 'category').replace(/-\w+$/, '')).trim();
+    const title = String(form.title || '').trim() || name;
+    const description = String(form.description || '').trim();
 
-    if (db.categories.some((category) => category.slug === slug)) {
+    if (db.categories.some((category) => category.slug === slug && category.slug !== editingSlug)) {
       setNotice('Já existe uma categoria com esse slug.');
+      return;
+    }
+
+    if (editing) {
+      updateDb((current) => ({
+        ...current,
+        categories: current.categories.map((category) =>
+          category.slug === editingSlug
+            ? {
+                ...category,
+                ...form,
+                name,
+                slug,
+                title,
+                description
+              }
+            : category
+        ),
+        products: current.products.map((product) =>
+          product.category === editingSlug ? { ...product, category: slug } : product
+        )
+      }));
+      reset();
+      setNotice('Categoria atualizada.');
       return;
     }
 
@@ -4237,13 +4021,15 @@ function CategoryManager({ db, updateDb, setNotice }) {
         {
           ...form,
           id: createId(form.name, 'category'),
+          name,
           slug,
-          title: form.title || form.name,
+          title,
+          description,
           sortOrder: current.categories.length + 1
         }
       ]
     }));
-    setForm(empty);
+    reset();
     setNotice('Categoria criada.');
   }
 
@@ -4257,13 +4043,14 @@ function CategoryManager({ db, updateDb, setNotice }) {
       ...current,
       categories: current.categories.filter((category) => category.slug !== categorySlug)
     }));
+    if (editingSlug === categorySlug) reset();
     setNotice('Categoria excluída.');
   }
 
   return (
     <div className="admin-grid">
       <form className="admin-card stack-form" onSubmit={submit}>
-        <h2>Criar categoria</h2>
+        <h2>{editing ? 'Editar categoria' : 'Criar categoria'}</h2>
         <div className="form-grid">
           <label>
             Nome
@@ -4300,9 +4087,16 @@ function CategoryManager({ db, updateDb, setNotice }) {
             Mostrar na home
           </label>
         </div>
-        <button className="button primary admin-submit-button" type="submit">
-          Criar categoria
-        </button>
+        <div className="form-actions">
+          <button className="button primary admin-submit-button" type="submit">
+            {editing ? 'Salvar categoria' : 'Criar categoria'}
+          </button>
+          {editing ? (
+            <button className="button secondary admin-submit-button" type="button" onClick={reset}>
+              Cancelar
+            </button>
+          ) : null}
+        </div>
       </form>
 
       <div className="admin-card">
@@ -4314,6 +4108,9 @@ function CategoryManager({ db, updateDb, setNotice }) {
                 <strong>{category.name}</strong>
                 <small>{category.slug}</small>
               </span>
+              <button type="button" onClick={() => edit(category)}>
+                Editar
+              </button>
               <button className="danger" type="button" onClick={() => remove(category.slug)}>
                 <Trash2 size={15} aria-hidden="true" />
               </button>
@@ -4329,9 +4126,17 @@ function ReceiptManager({ db, updateDb, setNotice }) {
   const pending = db.orders.filter((order) => order.status === 'pending');
   const [previewOrder, setPreviewOrder] = useState(null);
 
-  function validate(order) {
+  function validate(order, validationAmount) {
+    const amount = Number(validationAmount ?? order.amount);
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setNotice('Informe um valor valido para validar a venda.');
+      return;
+    }
+
     updateDb((current) => {
       const orderItems = getOrderItems(order);
+      const updatedItems = applyAmountToOrderItems(orderItems, amount);
       const orderProductIds = orderItems.map((item) => item.productId).filter(Boolean);
       const orderProductSet = new Set(orderProductIds);
       const reservationKeys = Array.isArray(order.reservationKeys) && order.reservationKeys.length
@@ -4350,7 +4155,15 @@ function ReceiptManager({ db, updateDb, setNotice }) {
         reservations,
         orders: current.orders.map((item) =>
           item.id === order.id
-            ? { ...item, status: 'validated', validatedAt: new Date().toISOString() }
+            ? {
+                ...item,
+                amount,
+                items: updatedItems,
+                validatedAmount: amount,
+                discountAmount: Math.max(0, Number(order.amount || 0) - amount),
+                status: 'validated',
+                validatedAt: new Date().toISOString()
+              }
             : item
         ),
         products: current.products.map((item) => {
@@ -4383,7 +4196,7 @@ function ReceiptManager({ db, updateDb, setNotice }) {
                 <Eye size={15} aria-hidden="true" />
                 Visualizar
               </button>
-              <button className="approve" type="button" onClick={() => validate(order)}>
+              <button className="approve" type="button" onClick={() => setPreviewOrder(order)}>
                 <Check size={15} aria-hidden="true" />
                 Validar
               </button>
@@ -4396,23 +4209,46 @@ function ReceiptManager({ db, updateDb, setNotice }) {
     </div>
     {previewOrder ? (
       <ReceiptPreviewModal
+        db={db}
         order={previewOrder}
         onClose={() => setPreviewOrder(null)}
-        onValidate={() => validate(previewOrder)}
+        onValidate={(amount) => validate(previewOrder, amount)}
       />
     ) : null}
     </>
   );
 }
 
-function ReceiptPreviewModal({ order, onClose, onValidate }) {
+function ReceiptPreviewModal({ db, order, onClose, onValidate }) {
+  const [validationAmount, setValidationAmount] = useState(String(order.amount || ''));
   const receiptType = order.receiptType || '';
   const canPreview = Boolean(order.receiptDataUrl);
   const isImage = receiptType.startsWith('image/');
   const isPdf = receiptType === 'application/pdf' || order.receiptName?.toLowerCase().endsWith('.pdf');
-  const itemList = getOrderItems(order)
-    .map((item) => (item.color ? `${item.productName} - ${colorLabel(item.color)}` : item.productName))
-    .join(', ');
+  const orderItems = getOrderItems(order);
+  const productSummaries = orderItems.map((item) => {
+    const product = db.products.find((entry) => entry.id === item.productId);
+    return {
+      ...item,
+      product,
+      displayName: product ? formatProductColorName(product, item.color || order.productColor) : item.productName,
+      categoryName: product ? categoryLabel(db.categories, product.category) : 'Categoria nao encontrada',
+      listPrice: product ? Number(product.price || 0) : Number(item.amount || 0)
+    };
+  });
+  const itemList = productSummaries.map((item) => item.displayName).join(', ');
+  const validationAmountNumber = Number(validationAmount || 0);
+  const originalAmount = Number(order.amount || 0);
+  const differenceAmount = originalAmount - validationAmountNumber;
+
+  useEffect(() => {
+    setValidationAmount(String(order.amount || ''));
+  }, [order.id, order.amount]);
+
+  function submitValidation() {
+    if (!Number.isFinite(validationAmountNumber) || validationAmountNumber <= 0) return;
+    onValidate(validationAmountNumber);
+  }
 
   return (
     <div className="modal" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -4433,9 +4269,43 @@ function ReceiptPreviewModal({ order, onClose, onValidate }) {
             <InfoLine label="CPF" value={order.customerCpf ? formatCpf(order.customerCpf) : 'Nao informado'} />
             <InfoLine label="E-mail" value={order.customerEmail || 'Nao informado'} />
             <InfoLine label="Itens" value={itemList || order.productName} />
-            <InfoLine label="Valor" value={currency.format(order.amount)} />
+            <InfoLine label="Valor enviado" value={currency.format(originalAmount)} />
             <InfoLine label="Arquivo" value={order.receiptName || 'Sem nome'} />
           </div>
+
+          <div className="receipt-product-box">
+            <h3>Dados do aparelho vendido</h3>
+            {productSummaries.map((item) => (
+              <div className="receipt-product-row" key={`${item.productId}-${item.color || 'default'}`}>
+                <span>
+                  <strong>{item.displayName}</strong>
+                  <small>
+                    {item.categoryName} · {item.product?.condition || item.condition || 'Condicao nao informada'} ·{' '}
+                    {item.quantity || 1} un.
+                  </small>
+                </span>
+                <span>{currency.format(item.listPrice)}</span>
+              </div>
+            ))}
+          </div>
+
+          <label className="validation-amount-field">
+            Valor validado da venda
+            <input
+              min="0.01"
+              step="0.01"
+              type="number"
+              value={validationAmount}
+              onChange={(event) => setValidationAmount(event.target.value)}
+            />
+            <span className="field-hint">
+              {differenceAmount > 0
+                ? `Desconto aplicado: ${currency.format(differenceAmount)}`
+                : differenceAmount < 0
+                  ? `Acréscimo aplicado: ${currency.format(Math.abs(differenceAmount))}`
+                  : 'Sem desconto aplicado.'}
+            </span>
+          </label>
 
           <div className="receipt-preview-frame">
             {canPreview && isImage ? (
@@ -4471,7 +4341,12 @@ function ReceiptPreviewModal({ order, onClose, onValidate }) {
                 Abrir em nova aba
               </a>
             ) : null}
-            <button className="button primary" type="button" onClick={onValidate}>
+            <button
+              className="button primary"
+              type="button"
+              disabled={!Number.isFinite(validationAmountNumber) || validationAmountNumber <= 0}
+              onClick={submitValidation}
+            >
               <Check size={17} aria-hidden="true" />
               Validar comprovante
             </button>
@@ -4482,10 +4357,278 @@ function ReceiptPreviewModal({ order, onClose, onValidate }) {
   );
 }
 
-function SalesManager({ orders }) {
-  const sales = orders.filter((order) => order.status === 'validated');
+function SalesManager({ db, updateDb, setNotice }) {
+  const sales = db.orders.filter((order) => order.status === 'validated');
+  const creditCardPaymentMethod = 'cartao_credito';
+  const paymentOptions = [
+    { value: 'pix', label: 'Pix' },
+    { value: creditCardPaymentMethod, label: 'Cartao de credito' },
+    { value: 'cartao_debito', label: 'Cartao de debito' },
+    { value: 'dinheiro', label: 'Dinheiro' },
+    { value: 'transferencia', label: 'Transferencia' },
+    { value: 'outro', label: 'Outro' }
+  ];
+  const installmentOptions = Array.from({ length: 12 }, (_, index) => index + 1);
+  const firstProduct = db.products[0];
+  const firstColor = firstProduct ? getProductStock(firstProduct)[0]?.color || firstProduct.color : '';
+  const [form, setForm] = useState({
+    productId: firstProduct?.id || '',
+    color: firstColor,
+    quantity: 1,
+    amount: firstProduct ? String(firstProduct.price) : '',
+    paymentMethod: paymentOptions[0].value,
+    installmentCount: '1',
+    userId: '',
+    customerName: '',
+    customerCpf: '',
+    note: ''
+  });
+  const selectedProduct = db.products.find((product) => product.id === form.productId);
+  const selectedUser = db.users.find((user) => user.id === form.userId);
+  const stockOptions = selectedProduct ? getProductStock(selectedProduct) : [];
+  const selectedStock = stockOptions.find((item) => item.color === form.color);
+  const maxQuantity = selectedStock?.quantity || 0;
+  const isCreditCard = form.paymentMethod === creditCardPaymentMethod;
+  const amountValue = Number(form.amount || 0);
+  const installmentCount = Math.max(1, Number.parseInt(form.installmentCount, 10) || 1);
+  const installmentAmount = amountValue > 0 ? amountValue / installmentCount : 0;
+  const installmentLabel = `${installmentCount}x de ${currency.format(installmentAmount)}`;
+
+  function updateProduct(productId) {
+    const product = db.products.find((item) => item.id === productId);
+    const color = product ? getProductStock(product)[0]?.color || product.color : '';
+    setForm((current) => ({
+      ...current,
+      productId,
+      color,
+      quantity: 1,
+      amount: product ? String(product.price) : ''
+    }));
+  }
+
+  function updatePaymentMethod(paymentMethod) {
+    setForm((current) => ({
+      ...current,
+      paymentMethod,
+      installmentCount: paymentMethod === creditCardPaymentMethod ? current.installmentCount || '1' : '1'
+    }));
+  }
+
+  function submitManualSale(event) {
+    event.preventDefault();
+
+    if (!selectedProduct) {
+      setNotice('Selecione um produto para registrar a venda.');
+      return;
+    }
+
+    const quantity = normalizeQuantity(form.quantity);
+    if (!quantity || quantity > maxQuantity) {
+      setNotice('Informe uma quantidade disponivel em estoque.');
+      return;
+    }
+
+    const customerName = selectedUser?.name || String(form.customerName || '').trim();
+    const customerCpf = selectedUser?.cpf || normalizeCpf(form.customerCpf);
+
+    if (!customerName) {
+      setNotice('Informe o nome do cliente.');
+      return;
+    }
+
+    if (!customerCpf || !isValidCpf(customerCpf)) {
+      setNotice('Informe um CPF valido para vincular a venda.');
+      return;
+    }
+
+    const amount = Number(form.amount || 0);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setNotice('Informe o valor da venda.');
+      return;
+    }
+
+    const payment = paymentOptions.find((option) => option.value === form.paymentMethod) || paymentOptions[0];
+    const creditInstallments = payment.value === creditCardPaymentMethod ? installmentCount : null;
+    const creditInstallmentAmount = payment.value === creditCardPaymentMethod ? amount / installmentCount : null;
+    const paymentLabel =
+      payment.value === creditCardPaymentMethod
+        ? `${payment.label} - ${installmentCount}x de ${currency.format(creditInstallmentAmount)}`
+        : payment.label;
+    const nowIso = new Date().toISOString();
+    const order = {
+      id: createId(`${selectedProduct.id}-venda-manual`, 'order'),
+      productId: selectedProduct.id,
+      productColor: form.color,
+      productName: formatProductColorName(selectedProduct, form.color),
+      items: [
+        {
+          productId: selectedProduct.id,
+          productName: selectedProduct.name,
+          color: form.color,
+          colorLabel: colorLabel(form.color),
+          amount,
+          condition: selectedProduct.condition,
+          quantity
+        }
+      ],
+      customerId: selectedUser?.id || '',
+      customerName,
+      customerEmail: selectedUser?.email || '',
+      customerCpf,
+      amount,
+      percent: 100,
+      mode: 'manual',
+      paymentMethod: payment.value,
+      paymentLabel,
+      installmentCount: creditInstallments,
+      installmentAmount: creditInstallmentAmount,
+      installmentLabel: creditInstallments ? `${creditInstallments}x de ${currency.format(creditInstallmentAmount)}` : '',
+      manualNote: String(form.note || '').trim(),
+      receiptName: paymentLabel,
+      status: 'validated',
+      createdAt: nowIso,
+      validatedAt: nowIso
+    };
+
+    updateDb((current) => ({
+      ...current,
+      orders: [...current.orders, order],
+      products: current.products.map((product) =>
+        product.id === selectedProduct.id ? decreaseStockForOrder(product, order.items) : product
+      )
+    }));
+
+    setNotice('Venda manual cadastrada.');
+    setForm((current) => ({
+      ...current,
+      quantity: 1,
+      amount: selectedProduct ? String(selectedProduct.price) : current.amount,
+      installmentCount: '1',
+      userId: '',
+      customerName: '',
+      customerCpf: '',
+      note: ''
+    }));
+  }
   return (
-    <div className="admin-card">
+    <div className="sales-manager-layout">
+      <form className="admin-card stack-form" onSubmit={submitManualSale}>
+        <h2>Cadastrar venda realizada</h2>
+        <div className="form-grid">
+          <label>
+            Produto
+            <select value={form.productId} onChange={(event) => updateProduct(event.target.value)}>
+              {db.products.map((product) => (
+                <option value={product.id} key={product.id}>
+                  {product.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Cor
+            <select value={form.color} onChange={(event) => setForm({ ...form, color: event.target.value })}>
+              {stockOptions.map((item) => (
+                <option value={item.color} key={item.id}>
+                  {colorLabel(item.color)} ({item.quantity} un.)
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Quantidade
+            <input
+              min="1"
+              max={maxQuantity || 1}
+              step="1"
+              type="number"
+              value={form.quantity}
+              onChange={(event) => setForm({ ...form, quantity: event.target.value })}
+            />
+          </label>
+          <label>
+            Valor total
+            <input
+              min="0"
+              step="0.01"
+              type="number"
+              value={form.amount}
+              onChange={(event) => setForm({ ...form, amount: event.target.value })}
+            />
+          </label>
+          <label>
+            Forma de pagamento
+            <select value={form.paymentMethod} onChange={(event) => updatePaymentMethod(event.target.value)}>
+              {paymentOptions.map((option) => (
+                <option value={option.value} key={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {isCreditCard ? (
+            <label>
+              Parcelamento
+              <select
+                value={form.installmentCount}
+                onChange={(event) => setForm({ ...form, installmentCount: event.target.value })}
+              >
+                {installmentOptions.map((option) => (
+                  <option value={option} key={option}>
+                    {option}x de {currency.format(amountValue > 0 ? amountValue / option : 0)}
+                  </option>
+                ))}
+              </select>
+              <span className="field-hint">
+                Parcela: {installmentLabel} no total de {currency.format(amountValue || 0)}
+              </span>
+            </label>
+          ) : null}
+          <label>
+            Usuario cadastrado
+            <select value={form.userId} onChange={(event) => setForm({ ...form, userId: event.target.value })}>
+              <option value="">Venda para cliente nao cadastrado</option>
+              {db.users.map((user) => (
+                <option value={user.id} key={user.id}>
+                  {user.name} - {formatCpf(user.cpf)}
+                </option>
+              ))}
+            </select>
+          </label>
+          {!selectedUser ? (
+            <>
+              <label>
+                Nome do cliente
+                <input
+                  required
+                  value={form.customerName}
+                  onChange={(event) => setForm({ ...form, customerName: event.target.value })}
+                />
+              </label>
+              <label>
+                CPF do cliente
+                <input
+                  required
+                  inputMode="numeric"
+                  maxLength={14}
+                  value={form.customerCpf}
+                  onChange={(event) => setForm({ ...form, customerCpf: formatCpfInput(event.target.value) })}
+                />
+              </label>
+            </>
+          ) : null}
+          <label className="wide-field">
+            Observacao
+            <textarea value={form.note} onChange={(event) => setForm({ ...form, note: event.target.value })} />
+          </label>
+        </div>
+        <button className="button primary admin-submit-button" type="submit" disabled={!selectedProduct || !maxQuantity}>
+          <Save size={17} aria-hidden="true" />
+          Registrar venda
+        </button>
+      </form>
+
+      <div className="admin-card">
       <h2>Vendas realizadas</h2>
       {sales.length ? (
         <div className="admin-list">
@@ -4496,6 +4639,7 @@ function SalesManager({ orders }) {
                 <small>
                   {order.customerName}
                   {order.customerCpf ? ` · CPF ${formatCpf(order.customerCpf)}` : ''} · {currency.format(order.amount)} ·{' '}
+                  {order.paymentLabel ? `${order.paymentLabel} Â· ` : ''}
                   {new Date(order.validatedAt).toLocaleDateString('pt-BR')}
                 </small>
               </span>
@@ -4505,12 +4649,19 @@ function SalesManager({ orders }) {
       ) : (
         <p className="muted">Nenhuma venda validada ainda.</p>
       )}
+      </div>
     </div>
   );
 }
 
 function AdminApproval({ db, updateDb, setNotice }) {
   const pending = db.admins.filter((admin) => admin.status === 'pending');
+  const adminKeys = new Set(
+    db.admins.map((admin) => `${String(admin.email || '').toLowerCase()}|${normalizeCpf(admin.cpf)}`)
+  );
+  const promotableUsers = db.users.filter(
+    (user) => !adminKeys.has(`${String(user.email || '').toLowerCase()}|${normalizeCpf(user.cpf)}`)
+  );
 
   function approve(adminId) {
     updateDb((current) => ({
@@ -4522,8 +4673,30 @@ function AdminApproval({ db, updateDb, setNotice }) {
     setNotice('Administrador aprovado.');
   }
 
+  function promoteUser(user) {
+    const promotedAdmin = {
+      id: createId(user.email, 'admin'),
+      name: user.name,
+      email: user.email,
+      cpf: user.cpf,
+      phone: user.phone || '',
+      password: user.password,
+      status: 'approved',
+      promotedFromUserId: user.id,
+      createdAt: user.createdAt || new Date().toISOString(),
+      approvedAt: new Date().toISOString()
+    };
+
+    updateDb((current) => ({
+      ...current,
+      admins: [...current.admins, promotedAdmin]
+    }));
+    setNotice(`${user.name} agora pode acessar o painel admin.`);
+  }
+
   return (
-    <div className="admin-card">
+    <div className="admin-manager-layout">
+      <div className="admin-card">
       <h2>Solicitações de novos administradores</h2>
       {pending.length ? (
         <div className="admin-list">
@@ -4545,6 +4718,31 @@ function AdminApproval({ db, updateDb, setNotice }) {
       ) : (
         <p className="muted">Nenhum admin pendente.</p>
       )}
+      </div>
+
+      <div className="admin-card">
+        <h2>Promover usuario cadastrado</h2>
+        {promotableUsers.length ? (
+          <div className="admin-list">
+            {promotableUsers.map((user) => (
+              <div className="admin-list-row" key={user.id}>
+                <span>
+                  <strong>{user.name}</strong>
+                  <small>
+                    {user.email}
+                    {user.cpf ? ` · CPF ${formatCpf(user.cpf)}` : ''}
+                  </small>
+                </span>
+                <button className="approve" type="button" onClick={() => promoteUser(user)}>
+                  Promover a admin
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="muted">Nenhum usuario disponivel para promover.</p>
+        )}
+      </div>
     </div>
   );
 }
@@ -4641,94 +4839,6 @@ function CheckoutModal({ product, reservation, settings, now, onClose, onReceipt
               Comprovante anexado: {reservation.receiptName || 'arquivo recebido'}. Aguardando
               validação do administrador.
             </p>
-          ) : null}
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function CartCheckoutModal({ products, reservations, settings, now, onClose, onReceipt, onCopyPix }) {
-  const [selectedReceipt, setSelectedReceipt] = useState(null);
-
-  useEffect(() => {
-    setSelectedReceipt(null);
-  }, [products.map((product) => `${product.id}:${product.selectedColor || product.color}`).join('|')]);
-
-  if (!products.length) return null;
-
-  const activeReservations = products
-    .map((product) => reservations?.[getReservationKey(product.id, product.selectedColor)])
-    .filter(Boolean);
-  const total = activeReservations.reduce((sum, reservation) => sum + (reservation.amount || 0), 0);
-  const expiresAt = activeReservations
-    .map((reservation) => reservation.expiresAt)
-    .filter(Boolean)
-    .sort((a, b) => a - b)[0];
-  const remaining = expiresAt ? expiresAt - now : 0;
-  const productList = products.map((product) => formatProductColorName(product, product.selectedColor)).join(', ');
-
-  function sendReceipt() {
-    if (!selectedReceipt) return;
-    onReceipt(selectedReceipt);
-    setSelectedReceipt(null);
-  }
-
-  return (
-    <div className="modal" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="cart-checkout-title">
-        <div className="modal-header">
-          <div>
-            <span className="product-badge">{products.length} produto(s)</span>
-            <h2 id="cart-checkout-title">Compra do carrinho</h2>
-          </div>
-          <button className="close-button" type="button" onClick={onClose} aria-label="Fechar">
-            <X size={18} aria-hidden="true" />
-          </button>
-        </div>
-
-        <div className="modal-body">
-          <div className="timer-box">
-            <strong className="timer">{formatTimer(remaining)}</strong>
-            <p>
-              Os produtos do carrinho foram reservados por 5 minutos. Realize o Pix do total,
-              escolha o arquivo e depois envie o comprovante.
-            </p>
-          </div>
-
-          <div className="pix-box">
-            <InfoLine label="Produtos" value={productList} />
-            <InfoLine label="Pagamento solicitado" value="100% do valor" />
-            <InfoLine label="Valor Pix" value={currency.format(total)} />
-            <InfoLine label="Chave Pix" value={settings.pixKey} />
-          </div>
-
-          <div className="modal-actions">
-            <label className="file-button">
-              <Upload size={17} aria-hidden="true" />
-              Escolher comprovante
-              <input
-                type="file"
-                accept="image/*,.pdf"
-                onChange={(event) => setSelectedReceipt(event.target.files?.[0] || null)}
-              />
-            </label>
-            <button className="button primary" type="button" disabled={!selectedReceipt} onClick={sendReceipt}>
-              <Upload size={17} aria-hidden="true" />
-              Enviar comprovante
-            </button>
-            <button className="button secondary" type="button" onClick={onCopyPix}>
-              <Copy size={17} aria-hidden="true" />
-              Copiar chave Pix
-            </button>
-            <a className="button secondary" href={getWhatsAppUrl(settings)} target="_blank" rel="noreferrer">
-              <MessageCircle size={17} aria-hidden="true" />
-              WhatsApp
-            </a>
-          </div>
-
-          {selectedReceipt ? (
-            <p className="selected-receipt">Arquivo selecionado: {selectedReceipt.name}</p>
           ) : null}
         </div>
       </section>

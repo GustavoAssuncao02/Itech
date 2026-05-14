@@ -1893,6 +1893,33 @@ input {
   padding: 18px;
 }
 
+.active-reservation-card {
+  grid-template-columns: 150px minmax(0, 1fr);
+  align-items: start;
+}
+
+.active-reservation-card .product-visual {
+  width: 150px;
+  height: 150px;
+  margin: 0;
+}
+
+.active-reservation-card .timer {
+  min-width: 76px;
+  min-height: 40px;
+  padding: 0 12px;
+  font-size: 1rem;
+}
+
+.active-reservation-card .order-details {
+  grid-column: 1 / -1;
+}
+
+.profile-reservation-actions {
+  grid-column: 1 / -1;
+  justify-content: flex-start;
+}
+
 .order-title-row {
   display: flex;
   flex-wrap: wrap;
@@ -2135,6 +2162,71 @@ input {
 .pix-line strong {
   color: var(--ink);
   text-align: right;
+}
+
+.receipt-product-box {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+  background: var(--white);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.receipt-product-box h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.receipt-product-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.receipt-product-row span:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.receipt-product-row strong {
+  color: var(--ink);
+}
+
+.receipt-product-row small {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.receipt-product-row > span:last-child {
+  color: var(--ink);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.validation-amount-field {
+  display: grid;
+  gap: 7px;
+  padding: 18px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: 0.88rem;
+  font-weight: 800;
+}
+
+.validation-amount-field input {
+  width: 100%;
+  min-height: 42px;
+  padding: 0 12px;
+  color: var(--ink);
+  background: var(--white);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
 }
 
 .modal-actions {
@@ -2445,6 +2537,13 @@ input {
   gap: 18px;
 }
 
+.product-manager-layout,
+.admin-manager-layout,
+.sales-manager-layout {
+  display: grid;
+  gap: 18px;
+}
+
 .admin-card {
   padding: 22px;
 }
@@ -2742,6 +2841,53 @@ input {
   cursor: pointer;
 }
 
+.product-admin-row {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.product-admin-summary {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 12px;
+}
+
+.product-admin-images {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  max-width: min(360px, 42vw);
+  gap: 7px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.product-admin-images img,
+.product-admin-images.empty {
+  width: 58px;
+  height: 58px;
+  flex: 0 0 58px;
+  background: var(--white);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.product-admin-images img {
+  padding: 5px;
+  object-fit: contain;
+}
+
+.product-admin-images.empty {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.product-admin-images.empty .device-shape {
+  transform: scale(0.34);
+}
+
 .stock-editor {
   display: grid;
   gap: 12px;
@@ -3010,9 +3156,15 @@ input {
   .bar-item,
   .access-day,
   .dashboard-sale-row,
+  .active-reservation-card,
   .order-card,
   .order-details {
     grid-template-columns: 1fr;
+  }
+
+  .active-reservation-card .product-visual {
+    width: 100%;
+    height: 210px;
   }
 
   .bar-item strong,
@@ -3538,6 +3690,15 @@ input {
   .receipt-row {
     grid-template-columns: 1fr;
     align-items: stretch;
+  }
+
+  .product-admin-summary {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .product-admin-images {
+    max-width: 100%;
   }
 
   .admin-list-row button {

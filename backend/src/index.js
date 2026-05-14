@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './env.js';
 import cors from 'cors';
 import express from 'express';
 import fs from 'node:fs';
@@ -6,13 +6,19 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import multer from 'multer';
 import {
+  authenticateUser,
+  changeUserPassword,
+  createLead,
+  createUser,
   getBusinessHours,
   getCategories,
   getDb,
   getProducts,
   getSettings,
   getStoreLocations,
-  migrate
+  getUsers,
+  migrate,
+  updateUser
 } from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -85,7 +91,8 @@ const uploadProductImages = multer({
 
 app.get('/api/health', async (_request, response, next) => {
   try {
-    await getDb();
+    const db = await getDb();
+    await db.query('SELECT 1');
     response.json({ status: 'ok' });
   } catch (error) {
     next(error);
@@ -194,31 +201,64 @@ app.get('/api/locations', async (_request, response, next) => {
   }
 });
 
+app.get('/api/users', async (_request, response, next) => {
+  try {
+    response.json({ users: await getUsers() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/users/register', async (request, response, next) => {
+  try {
+    const user = await createUser(request.body);
+    response.status(201).json({ user });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/users/login', async (request, response, next) => {
+  try {
+    const user = await authenticateUser(request.body.email, request.body.password);
+    response.json({ user });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put('/api/users/:id', async (request, response, next) => {
+  try {
+    const user = await updateUser(request.params.id, request.body);
+    response.json({ user });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put('/api/users/:id/password', async (request, response, next) => {
+  try {
+    await changeUserPassword(request.params.id, request.body);
+    response.json({ status: 'ok' });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/api/leads', async (request, response, next) => {
   try {
     const customerName = String(request.body.customerName ?? '').trim();
     const phone = String(request.body.phone ?? '').trim();
     const message = String(request.body.message ?? '').trim();
-    const productId = request.body.productId ? Number(request.body.productId) : null;
+    const productId = request.body.productId ? String(request.body.productId) : null;
 
     if (!customerName) {
       response.status(400).json({ message: 'Informe o nome do cliente.' });
       return;
     }
 
-    const db = await getDb();
-    const result = await db.run(
-      `
-        INSERT INTO leads (customer_name, phone, product_id, message)
-        VALUES (?, ?, ?, ?)
-      `,
-      customerName,
-      phone,
-      productId,
-      message
-    );
-
-    response.status(201).json({ id: result.lastID });
+    const lead = await createLead({ customerName, phone, productId, message });
+    response.status(201).json(lead);
   } catch (error) {
     next(error);
   }
