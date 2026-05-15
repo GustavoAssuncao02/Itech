@@ -9,3 +9,4 @@ backend/uploads/*
 !backend/uploads/.gitkeep
 .logs/
 requisição.md
+requisição.md
