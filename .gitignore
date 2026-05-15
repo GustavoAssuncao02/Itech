@@ -8,3 +8,4 @@ backend/data/*.db
 backend/uploads/*
 !backend/uploads/.gitkeep
 .logs/
+requisição.md
